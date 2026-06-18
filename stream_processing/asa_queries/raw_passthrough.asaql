@@ -1,7 +1,54 @@
--- PLANNED — Layer 2, "raw passthrough to cold storage" (see README section 3).
--- No windowing — straight pass-through, partitioned by date downstream.
+-- =============================================================================
+-- RAW PASSTHROUGH TO COLD STORAGE  (Layer 2 — see README.md section 3)
+-- =============================================================================
+-- No windowing — straight pass-through. This is bronze's only path INTO the
+-- lakehouse; everything else (rolling averages, anomalies) is a derived
+-- aggregate, but bronze must receive every raw event untouched so it stays
+-- a faithful, replayable landing zone (see Layer 3 — README schema
+-- evolution decision, and BRONZE_SCHEMA in
+-- batch/databricks_notebooks/utils/schema_definitions.py, which this
+-- query's output columns are deliberately kept aligned with).
 --
--- TODO:
--- SELECT *
--- INTO ADLSColdOutput   -- ADLS Gen2, partitioned by ingestion date (Layer 3 bronze)
--- FROM EventHubInput
+-- No TIMESTAMP BY here on purpose: this path doesn't aggregate by time, so
+-- there's no windowing logic that NEEDS event time over arrival time, and
+-- skipping it avoids opting into late-arrival/out-of-order policies that
+-- would only add complexity for a query that's just forwarding events.
+-- Layer 3's bronze ingest notebook is what actually partitions by
+-- ingestion_date once these rows land in ADLS Gen2.
+-- =============================================================================
+
+SELECT
+    city_id,
+    poll_timestamp,
+    source,
+    schema_version,
+    ingestion_date,
+    dt,
+    lat,
+    lon,
+    temp,
+    feels_like,
+    temp_min,
+    temp_max,
+    pressure,
+    humidity,
+    visibility,
+    wind_speed,
+    wind_deg,
+    clouds_all,
+    weather_main,
+    weather_description,
+    aqi,
+    co,
+    no,
+    no2,
+    o3,
+    so2,
+    pm2_5,
+    pm10,
+    nh3,
+    raw_payload_json
+INTO
+    ADLSColdOutput   -- ADLS Gen2, partitioned by ingestion_date downstream (Layer 3 bronze)
+FROM
+    EventHubInput

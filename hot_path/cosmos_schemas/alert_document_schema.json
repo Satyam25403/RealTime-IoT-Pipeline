@@ -1,11 +1,14 @@
 {
-  "_comment": "PLANNED — Layer 4 alert document shape, written by ASA's anomaly_detection.asaql (see README section 3, Cosmos DB partition key decision).",
-  "id": "<guid>",
-  "city_id": "<partition key — see README for why city_id was chosen>",
-  "detected_at": "<ISO8601 timestamp>",
-  "metric": "temperature | aqi",
-  "value": "<number>",
-  "threshold_breached": "<number>",
-  "window_start": "<ISO8601>",
-  "window_end": "<ISO8601>"
+  "_comment": "Layer 4 alert document shape, written by ASA's anomaly_detection.asaql. Matches that query's actual SELECT output field-for-field — see README section 3 (Cosmos DB partition key decision) for why city_id is the partition key.",
+  "_design_note": "One document per (city_id, window) where the HAVING clause fired, NOT one document per metric. The trigger can be a temp swing, an AQI breach, or both at once in the same window -- 'temperature_swing' and 'aqi_threshold' booleans flag which condition(s) actually fired, rather than forcing a single-metric model that can't represent a row where both fired together.",
+  "id": "<guid, generated at write time, not by ASA itself>",
+  "city_id": "<partition key>",
+  "detected_at": "<ISO8601 timestamp, from System.Timestamp() -- the window end time>",
+  "window_max_temp": "<number, degrees C>",
+  "window_min_temp": "<number, degrees C>",
+  "temp_swing": "<number, window_max_temp - window_min_temp>",
+  "window_max_aqi": "<integer, 1-5 OWM scale -- NOT EPA 0-500, see docs/openweathermap_api_reference.md>",
+  "window_max_pm2_5": "<number, micrograms/m3>",
+  "temperature_swing_triggered": "<boolean, true if temp_swing > 8>",
+  "aqi_threshold_triggered": "<boolean, true if window_max_aqi >= 5>"
 }

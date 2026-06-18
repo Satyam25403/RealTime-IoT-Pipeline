@@ -34,7 +34,7 @@ ever touching the cloud. This is called out explicitly wherever it's relevant be
 | Layer | Status | Notes |
 |---|---|---|
 | 1 — Ingestion | **Implemented, mock-tested** | `ingestion/function_app/` — see section 3 implementation notes. Not yet run against the live Event Hub emulator (Docker unavailable in build environment) — see section 5a. |
-| 2 — Stream Processing | Planned (`.asaql` files are stubs) | |
+| 2 — Stream Processing | **Implemented, mock-tested** | `stream_processing/asa_queries/` (real SAQL) + `local_emulation/windowing_logic.py` (6/6 unit tests passing). Spark wrapper design-verified, not yet run against a live emulator (no PySpark in build environment). |
 | 3 — Batch Transformation | Schemas defined (`schema_definitions.py`), notebooks are stubs | |
 | 4 — Hot Path Serving | Planned | |
 | 5 — Cold Path Serving | Planned | |
@@ -155,29 +155,68 @@ under the 60/min ceiling with room for retries — see
 
 ### Layer 2 — Stream Processing
 
+**Implementation status: all three queries are written in real Azure Stream
+Analytics Query Language** (`stream_processing/asa_queries/*.asaql`), not
+just described — see implementation notes below for what was verified and
+how. Full local logic-parity testing for the windowing arithmetic also
+exists (`stream_processing/local_emulation/windowing_logic.py`).
+
 **Tumbling vs hopping vs sliding windows.**
 Three outputs need three different window semantics in the same ASA job:
-- *Rolling averages per city* → **hopping window** (e.g. 10-minute window,
-  hopping every 2 minutes). A tumbling window only emits one non-overlapping
-  average per fixed interval, which is too coarse for a metric that should
-  read as "rolling." Hopping windows overlap, producing smoother and more
-  frequent updates while staying deterministic and boundable.
-- *Anomaly detection* → **sliding window**, evaluated per incoming event
-  (e.g. "did temperature move more than X in the last 15 minutes"). Anomalies
-  need to be flagged the instant a qualifying event arrives, not only at fixed
-  window boundaries — sliding windows are the only one of the three that
-  triggers on every new event rather than on a clock.
+- *Rolling averages per city* → **hopping window** (10-minute window,
+  hopping every 2 minutes — `HoppingWindow(minute, 10, 2)`). A tumbling
+  window only emits one non-overlapping average per fixed interval, which is
+  too coarse for a metric that should read as "rolling." Hopping windows
+  overlap, producing smoother and more frequent updates while staying
+  deterministic and boundable.
+- *Anomaly detection* → **sliding window** (`SlidingWindow(minute, 15)`),
+  evaluated per incoming event. Anomalies need to be flagged the instant a
+  qualifying event arrives, not only at fixed window boundaries — sliding
+  windows are the only one of the three that triggers on every new event
+  rather than on a clock; per Microsoft's own definition, a sliding window
+  only emits output at moments when its content actually changes (an event
+  entering or leaving it), not on a fixed schedule.
 - *Raw passthrough to cold storage* → no windowing. Straight pass-through,
-  output partitioned by date so downstream ADF/Databricks reads are efficient.
+  output partitioned by date so downstream ADF/Databricks reads are
+  efficient. Deliberately has no `TIMESTAMP BY` either — there's no
+  time-based aggregation here that needs event time over arrival time, so
+  opting into watermark/late-arrival semantics for a pure forwarding query
+  would only add complexity with no benefit.
+
+**Per-city substreams (`OVER city_id`).** Both the hopping and sliding
+window queries use `TIMESTAMP BY poll_timestamp OVER city_id`, not just
+`TIMESTAMP BY poll_timestamp`. Without `OVER`, ASA computes one shared
+watermark across all 12 cities feeding the same Event Hub input — if any
+single city's events were delayed, every other city's window output would
+be held back waiting for that one straggler. `OVER` gives each city its own
+independent watermark, so one slow or quiet city never blocks the other 11.
+This wasn't in the original plan and was added once the substream mechanism
+was confirmed during implementation — worth knowing about if you're
+debugging why one city's data looks "stuck."
 
 **Late event handling.**
 The API is polled on a schedule, so events should usually arrive close to
 in-order, but Function retries or transient network delay can still produce
-late arrivals. Late arrival tolerance is set to ~5 minutes and out-of-order
-tolerance to ~30 seconds, both using the **adjust** policy rather than **drop**.
-Silently dropping late events would quietly corrupt rolling averages with no
-visible failure — a real production bug class, and one worth catching here
-rather than discovering downstream.
+late arrivals. Late arrival tolerance is ~5 minutes and out-of-order
+tolerance is ~30 seconds, both using the **Adjust** policy rather than
+**Drop** — silently dropping late events would quietly corrupt rolling
+averages with no visible failure, a real production bug class worth
+catching here rather than discovering downstream.
+
+**Important correction from the original plan**: these tolerances are
+**job-level settings**, not something written inside the `.asaql` query
+text. They're configured via the Event Ordering tab in the Azure portal, or
+via CLI/IaC:
+```bash
+az stream-analytics job update \
+  --resource-group <rg> --name <job-name> \
+  --events-late-arrival-max-delay-time 00:05:00 \
+  --events-out-of-order-max-delay-time 00:00:30 \
+  --events-out-of-order-policy Adjust
+```
+This should be wired into `infra/bicep/streamanalytics.bicep` once that
+module moves past its current stub state — flagging it here so it isn't
+lost between "documented as a decision" and "actually configured."
 
 **Streaming Unit sizing.**
 Data volume here is sub-1 MB/s, so 1–3 SUs would technically suffice. I sized
@@ -188,6 +227,40 @@ learning/demo project. In a real production setting, SU sizing should come
 from ASA's own metrics (SU% utilization, backlogged events), not an a priori
 guess — see the KQL query in `docs/kql/asa_su_utilization.kql` for how that
 would be monitored.
+
+**Implementation notes (Layer 2 is now built — see
+`stream_processing/asa_queries/` and `stream_processing/local_emulation/`):**
+- A real inconsistency was caught and fixed while implementing this layer:
+  the original `alert_document_schema.json` modeled one alert per single
+  metric (`metric: "temperature | aqi"`, one `value` field), but
+  `anomaly_detection.asaql`'s `HAVING` clause can fire on the temp-swing
+  condition, the AQI condition, or both at once in the same window — a
+  single-metric schema can't represent the "both fired together" case.
+  Fixed by emitting two boolean trigger flags
+  (`temperature_swing_triggered`, `aqi_threshold_triggered`) per window
+  instead, and updating the schema to match the query's actual output
+  field-for-field — verified by the same automated field-diff approach used
+  for Layer 1/Layer 3 schema parity, not just by eye.
+- `windowing_logic.py` holds the rolling-average and anomaly-detection
+  aggregation math as plain, Spark-free Python functions, and is directly
+  unit-tested (6 cases: a normal window, an empty window, a temp-swing-only
+  trigger, an AQI-only trigger, neither triggering — confirming `HAVING`
+  suppression is reproduced correctly — and both triggering simultaneously,
+  which is the exact case that drove the schema fix above). All 6 passed.
+  `pyspark_structured_streaming_equivalent.py` imports and delegates to
+  these verified functions rather than reimplementing the arithmetic inline,
+  so the Spark wrapper only has wiring left to get wrong.
+- The Spark wrapper itself (Kafka read, watermarking, the tumbling-window
+  approximation of a true hop) is design-verified, not execution-verified —
+  no PySpark/JVM available in the environment this was built in. Run it
+  yourself against the emulator (`docker compose up -d`, `pip install
+  pyspark`, then run the file) and treat that as the one open item for this
+  layer, the same way the Event Hub emulator smoke test was flagged for
+  Layer 1.
+- `raw_passthrough.asaql`'s `SELECT` column list was diffed against
+  `BRONZE_SCHEMA` in `schema_definitions.py` and matches exactly (30/30
+  fields) — this is what actually guarantees Layer 2's cold-path output
+  lands in bronze in the shape Layer 3 expects.
 
 ### Layer 3 — Batch Transformation
 

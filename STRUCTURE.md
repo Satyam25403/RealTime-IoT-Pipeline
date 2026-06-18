@@ -41,13 +41,16 @@ realtime-iot-pipeline/
 │       ├── requirements.txt
 │       └── local.settings.json.example
 │
-├── stream_processing/                 # LAYER 2 — governs windowing logic, never raw code execution
+├── stream_processing/                 # LAYER 2 — governs windowing logic, never raw code execution [IMPLEMENTED]
 │   ├── asa_queries/
-│   │   ├── rolling_averages.asaql     # Hopping window query
-│   │   ├── anomaly_detection.asaql    # Sliding window query
-│   │   └── raw_passthrough.asaql      # Unwindowed passthrough to ADLS
+│   │   ├── rolling_averages.asaql     # Hopping window query — real SAQL, OVER city_id substreams
+│   │   ├── anomaly_detection.asaql    # Sliding window query — real SAQL, dual trigger flags
+│   │   └── raw_passthrough.asaql      # Unwindowed passthrough to ADLS — field-diff verified vs BRONZE_SCHEMA
 │   └── local_emulation/
+│       ├── windowing_logic.py         # Spark-free aggregation math, 6/6 unit tests passing
+│       │                              # (added during implementation — not in original plan)
 │       └── pyspark_structured_streaming_equivalent.py  # Logic parity test, runs locally against Event Hub emulator
+│                                                          # delegates math to windowing_logic.py
 │
 ├── batch/                             # LAYER 3 — governs daily bronze→silver→gold transformation
 │   ├── databricks_notebooks/

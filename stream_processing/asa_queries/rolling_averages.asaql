@@ -1,12 +1,47 @@
--- PLANNED — Layer 2, "rolling averages per city" (see README section 3).
--- Window type: HOPPING (deliberately not tumbling — see README for why).
+-- =============================================================================
+-- ROLLING AVERAGES PER CITY  (Layer 2 — see README.md section 3)
+-- =============================================================================
+-- Window type: HOPPING, not tumbling — see README for the reasoning (a
+-- tumbling window only emits one non-overlapping value per fixed interval,
+-- too coarse for a "rolling" metric that should update frequently).
 --
--- TODO:
--- SELECT
---     city_id,
---     AVG(temperature) AS avg_temperature,
---     AVG(aqi) AS avg_aqi,
---     System.Timestamp() AS window_end
--- INTO RollingAveragesOutput
--- FROM EventHubInput TIMESTAMP BY poll_timestamp
--- GROUP BY city_id, HoppingWindow(minute, 10, 2)
+-- 10-minute window, hopping every 2 minutes: each output reflects the
+-- trailing 10 minutes of data, refreshed every 2 minutes — 5x more frequent
+-- updates than a 10-minute tumbling window would give, while each window
+-- still only spans a bounded 10 minutes.
+--
+-- TIMESTAMP BY ... OVER city_id creates a SUBSTREAM per city. Without this,
+-- ASA computes one global watermark across all 12 cities sharing this
+-- Event Hub input — if any single city's events are delayed, EVERY city's
+-- output would be held back waiting for that one straggler. With OVER, each
+-- city gets its own independent watermark, so one slow/quiet city never
+-- blocks the other 11.
+--
+-- Late arrival / out-of-order tolerance are NOT set in this query file —
+-- those are JOB-LEVEL settings (Event Ordering tab in the Azure portal, or
+-- via `az stream-analytics job update --events-late-arrival-max-delay-time
+-- 00:05:00 --events-out-of-order-max-delay-time 00:00:30
+-- --events-out-of-order-policy Adjust`), not SAQL syntax. README documents
+-- the VALUES we use (5 min late arrival, 30 sec out-of-order, Adjust not
+-- Drop) — this comment documents WHERE that setting actually lives, since
+-- it's easy to go looking for it in the query text and not find it.
+-- =============================================================================
+
+SELECT
+    city_id,
+    AVG(temp) AS avg_temp,
+    MIN(temp) AS min_temp,
+    MAX(temp) AS max_temp,
+    AVG(humidity) AS avg_humidity,
+    AVG(aqi) AS avg_aqi,
+    AVG(pm2_5) AS avg_pm2_5,
+    AVG(pm10) AS avg_pm10,
+    COUNT(*) AS observation_count,
+    System.Timestamp() AS window_end_time
+INTO
+    RollingAveragesOutput   -- Power BI push dataset (Layer 4 real-time city metrics)
+FROM
+    EventHubInput TIMESTAMP BY poll_timestamp OVER city_id
+GROUP BY
+    city_id,
+    HoppingWindow(minute, 10, 2)

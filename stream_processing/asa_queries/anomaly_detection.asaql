@@ -1,12 +1,43 @@
--- PLANNED — Layer 2, "anomaly detection" (see README section 3).
--- Window type: SLIDING (triggers per-event, not on a fixed clock).
+-- =============================================================================
+-- ANOMALY DETECTION PER CITY  (Layer 2 — see README.md section 3)
+-- =============================================================================
+-- Window type: SLIDING — the only one of the three window types that
+-- triggers evaluation on every new event rather than on a fixed clock tick
+-- (per Microsoft's own definition: sliding windows output events only at
+-- points in time when the window's content actually changes, i.e. when an
+-- event enters or exits it). That's required here: an anomaly needs to be
+-- flagged the instant a qualifying event arrives, not only at the next
+-- hop/tumble boundary.
 --
--- TODO:
--- SELECT
---     city_id,
---     temperature,
---     System.Timestamp() AS detected_at
--- INTO AnomalyAlertsOutput   -- writes to Cosmos DB (Layer 4)
--- FROM EventHubInput TIMESTAMP BY poll_timestamp
--- GROUP BY city_id, SlidingWindow(minute, 15)
--- HAVING MAX(temperature) - MIN(temperature) > <threshold>
+-- 15-minute sliding window. The HAVING clause is the anomaly threshold:
+-- flags a city when the spread between its highest and lowest temperature
+-- reading in the last 15 minutes exceeds 8 degrees C, OR when AQI (OWM's
+-- 1-5 scale — see docs/openweathermap_api_reference.md, NOT the EPA 0-500
+-- scale) hits the worst category.
+--
+-- Same OVER city_id substream reasoning as rolling_averages.asaql applies
+-- here — one city's data gap must not delay another city's anomaly signal.
+-- =============================================================================
+
+SELECT
+    city_id,
+    MAX(temp) AS window_max_temp,
+    MIN(temp) AS window_min_temp,
+    MAX(temp) - MIN(temp) AS temp_swing,
+    MAX(aqi) AS window_max_aqi,
+    MAX(pm2_5) AS window_max_pm2_5,
+    CASE WHEN (MAX(temp) - MIN(temp)) > 8 THEN 1 ELSE 0 END AS temperature_swing_triggered,
+    CASE WHEN MAX(aqi) >= 5 THEN 1 ELSE 0 END AS aqi_threshold_triggered,
+    System.Timestamp() AS detected_at
+INTO
+    AnomalyAlertsOutput   -- Cosmos DB (Layer 4 hot path — see alert_document_schema.json,
+                           -- whose fields match this SELECT exactly, including the two
+                           -- *_triggered flags computed here rather than re-derived downstream)
+FROM
+    EventHubInput TIMESTAMP BY poll_timestamp OVER city_id
+GROUP BY
+    city_id,
+    SlidingWindow(minute, 15)
+HAVING
+    (MAX(temp) - MIN(temp)) > 8   -- degrees C, swing within a 15-min window
+    OR MAX(aqi) >= 5               -- OWM's own worst AQI category
