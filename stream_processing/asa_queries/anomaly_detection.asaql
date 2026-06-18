@@ -1,0 +1,12 @@
+-- PLANNED — Layer 2, "anomaly detection" (see README section 3).
+-- Window type: SLIDING (triggers per-event, not on a fixed clock).
+--
+-- TODO:
+-- SELECT
+--     city_id,
+--     temperature,
+--     System.Timestamp() AS detected_at
+-- INTO AnomalyAlertsOutput   -- writes to Cosmos DB (Layer 4)
+-- FROM EventHubInput TIMESTAMP BY poll_timestamp
+-- GROUP BY city_id, SlidingWindow(minute, 15)
+-- HAVING MAX(temperature) - MIN(temperature) > <threshold>

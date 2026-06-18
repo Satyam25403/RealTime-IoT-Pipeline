@@ -1,0 +1,12 @@
+-- PLANNED — Layer 2, "rolling averages per city" (see README section 3).
+-- Window type: HOPPING (deliberately not tumbling — see README for why).
+--
+-- TODO:
+-- SELECT
+--     city_id,
+--     AVG(temperature) AS avg_temperature,
+--     AVG(aqi) AS avg_aqi,
+--     System.Timestamp() AS window_end
+-- INTO RollingAveragesOutput
+-- FROM EventHubInput TIMESTAMP BY poll_timestamp
+-- GROUP BY city_id, HoppingWindow(minute, 10, 2)

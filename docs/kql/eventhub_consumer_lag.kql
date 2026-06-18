@@ -1,0 +1,12 @@
+// PLANNED — Layer 6 observability (see README section 3).
+// Diagnoses Event Hub consumer lag: difference between the last enqueued
+// sequence number per partition and the last sequence number checkpointed
+// by Stream Analytics. Persistent/growing lag = ASA falling behind ingestion.
+//
+// TODO (against the AzureDiagnostics / EventHubLogs table in Log Analytics):
+// AzureDiagnostics
+// | where ResourceProvider == "MICROSOFT.EVENTHUB"
+// | where OperationName == "PartitionCheckpointed" or OperationName == "PartitionEvents"
+// | summarize LastCheckpoint = max(TimeGenerated) by PartitionId = tostring(properties_s.PartitionId)
+// | join kind=inner ( ... last enqueued time per partition ... ) on PartitionId
+// | extend LagSeconds = datetime_diff('second', LastEnqueued, LastCheckpoint)

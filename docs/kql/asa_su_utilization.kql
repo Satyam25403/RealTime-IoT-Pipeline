@@ -1,0 +1,10 @@
+// PLANNED — Layer 6 observability (see README section 3, "Streaming Unit sizing").
+// Surfaces SU% utilization over time so SU count can be right-sized from
+// actual metrics rather than the a-priori guess documented in the README.
+//
+// TODO (against AzureMetrics for the Stream Analytics job):
+// AzureMetrics
+// | where ResourceProvider == "MICROSOFT.STREAMANALYTICS"
+// | where MetricName == "SUUtilization"
+// | summarize AvgUtilization = avg(Average), MaxUtilization = max(Maximum) by bin(TimeGenerated, 5m)
+// | where AvgUtilization > 80   // alert threshold candidate

@@ -1,0 +1,11 @@
+-- PLANNED — Layer 5, Synapse serverless SQL external tables over gold Delta
+-- (see README section 3, "OPENROWSET vs PolyBase" decision).
+--
+-- TODO:
+-- CREATE EXTERNAL TABLE gold_city_daily_stats
+-- WITH (
+--     LOCATION = 'gold/city_daily_stats/',
+--     DATA_SOURCE = AdlsGoldSource,
+--     FILE_FORMAT = DeltaFileFormat
+-- )
+-- AS SELECT * FROM OPENROWSET(BULK 'gold/city_daily_stats/', DATA_SOURCE = 'AdlsGoldSource', FORMAT = 'DELTA') AS rows

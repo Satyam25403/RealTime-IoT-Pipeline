@@ -1,0 +1,23 @@
+{
+  "UserConfig": {
+    "NamespaceConfig": [
+      {
+        "Type": "EventHub",
+        "Name": "emulatorNs1",
+        "Entities": [
+          {
+            "Name": "weather-events",
+            "PartitionCount": "4",
+            "ConsumerGroups": [
+              { "Name": "$Default" },
+              { "Name": "stream-analytics-local-emulation" }
+            ]
+          }
+        ]
+      }
+    ],
+    "LoggingConfig": {
+      "Type": "File"
+    }
+  }
+}

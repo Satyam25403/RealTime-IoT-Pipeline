@@ -1,0 +1,5 @@
+[
+  { "city_id": "hyderabad", "name": "Hyderabad", "lat": 17.385, "lon": 78.4867 },
+  { "city_id": "vijayawada", "name": "Vijayawada", "lat": 16.5062, "lon": 80.648 },
+  { "city_id": "bengaluru", "name": "Bengaluru", "lat": 12.9716, "lon": 77.5946 }
+]

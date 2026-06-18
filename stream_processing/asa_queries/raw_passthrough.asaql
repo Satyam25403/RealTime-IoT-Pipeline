@@ -1,0 +1,7 @@
+-- PLANNED — Layer 2, "raw passthrough to cold storage" (see README section 3).
+-- No windowing — straight pass-through, partitioned by date downstream.
+--
+-- TODO:
+-- SELECT *
+-- INTO ADLSColdOutput   -- ADLS Gen2, partitioned by ingestion date (Layer 3 bronze)
+-- FROM EventHubInput

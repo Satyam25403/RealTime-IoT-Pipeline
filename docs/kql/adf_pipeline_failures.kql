@@ -1,0 +1,10 @@
+// PLANNED — Layer 6 observability (see README section 3).
+// Surfaces failed ADF pipeline runs (the daily bronze->silver->gold trigger)
+// so failures are caught same-day rather than discovered when gold is stale.
+//
+// TODO (against ADFPipelineRun table in Log Analytics):
+// ADFPipelineRun
+// | where PipelineName == "pl_daily_batch_trigger"
+// | where Status == "Failed"
+// | project TimeGenerated, RunId, Status, Parameters, ErrorMessage = tostring(Output.error)
+// | order by TimeGenerated desc

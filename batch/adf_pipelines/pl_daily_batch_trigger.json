@@ -1,0 +1,7 @@
+{
+  "name": "pl_daily_batch_trigger",
+  "description": "PLANNED — daily ADF pipeline. Trigger: schedule, once per day. Single activity: DatabricksNotebook, runs 01_bronze_ingest -> 02_silver_clean_dedup -> 03_gold_aggregate_zorder in sequence. On failure: alert via Log Analytics (see docs/kql/adf_pipeline_failures.kql).",
+  "properties": {
+    "activities": []
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "_comment": "PLANNED — Layer 4 alert document shape, written by ASA's anomaly_detection.asaql (see README section 3, Cosmos DB partition key decision).",
+  "id": "<guid>",
+  "city_id": "<partition key — see README for why city_id was chosen>",
+  "detected_at": "<ISO8601 timestamp>",
+  "metric": "temperature | aqi",
+  "value": "<number>",
+  "threshold_breached": "<number>",
+  "window_start": "<ISO8601>",
+  "window_end": "<ISO8601>"
+}
