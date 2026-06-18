@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.pyc
+local.settings.json
+.env
+*.zip
+.vscode/
+bin/
+obj/
+.python_packages/
+node_modules/

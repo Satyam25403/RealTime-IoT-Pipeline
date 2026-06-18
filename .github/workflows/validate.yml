@@ -1,0 +1,25 @@
+name: validate
+
+on: [pull_request]
+
+jobs:
+  bicep-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Lint all Bicep files
+        run: |
+          # TODO: az bicep build --file infra/bicep/main.bicep (validates syntax + module refs)
+          echo "PLANNED — az bicep build against infra/bicep/main.bicep"
+
+  local-smoke-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Start local emulator stack
+        run: docker compose -f tests/local_dev/docker-compose.yml up -d
+      - name: Run publish/consume smoke test
+        run: |
+          # TODO: pip install -r ingestion/function_app/requirements.txt
+          # TODO: python tests/local_dev/test_publish_and_consume.py
+          echo "PLANNED — runs tests/local_dev/test_publish_and_consume.py against the emulator"

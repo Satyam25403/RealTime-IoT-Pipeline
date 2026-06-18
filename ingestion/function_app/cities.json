@@ -1,5 +1,14 @@
 [
   { "city_id": "hyderabad", "name": "Hyderabad", "lat": 17.385, "lon": 78.4867 },
   { "city_id": "vijayawada", "name": "Vijayawada", "lat": 16.5062, "lon": 80.648 },
-  { "city_id": "bengaluru", "name": "Bengaluru", "lat": 12.9716, "lon": 77.5946 }
+  { "city_id": "bengaluru", "name": "Bengaluru", "lat": 12.9716, "lon": 77.5946 },
+  { "city_id": "mumbai", "name": "Mumbai", "lat": 19.076, "lon": 72.8777 },
+  { "city_id": "delhi", "name": "Delhi", "lat": 28.7041, "lon": 77.1025 },
+  { "city_id": "chennai", "name": "Chennai", "lat": 13.0827, "lon": 80.2707 },
+  { "city_id": "kolkata", "name": "Kolkata", "lat": 22.5726, "lon": 88.3639 },
+  { "city_id": "pune", "name": "Pune", "lat": 18.5204, "lon": 73.8567 },
+  { "city_id": "ahmedabad", "name": "Ahmedabad", "lat": 23.0225, "lon": 72.5714 },
+  { "city_id": "jaipur", "name": "Jaipur", "lat": 26.9124, "lon": 75.7873 },
+  { "city_id": "lucknow", "name": "Lucknow", "lat": 26.8467, "lon": 80.9462 },
+  { "city_id": "kochi", "name": "Kochi", "lat": 9.9312, "lon": 76.2673 }
 ]

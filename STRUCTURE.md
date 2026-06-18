@@ -27,13 +27,15 @@ realtime-iot-pipeline/
 │
 ├── ingestion/                         # LAYER 1 — governs what gets published to Event Hub
 │   └── function_app/
-│       ├── HttpTriggerCityPoll/       # (will rename to TimerTriggerCityPoll)
+│       ├── TimerTriggerCityPoll/      # implemented — timer trigger, see README section 3
 │       │   ├── __init__.py            # Function entrypoint: poll → enrich → publish
 │       │   └── function.json          # Timer trigger binding (CRON schedule)
 │       ├── shared/
 │       │   ├── owm_client.py          # OpenWeatherMap API wrapper, retry logic
 │       │   ├── enrichment.py          # Adds metadata: poll_timestamp, source, schema_version
-│       │   └── eventhub_publisher.py  # Batches + sends to Event Hub
+│       │   ├── eventhub_publisher.py  # Batches + sends to Event Hub
+│       │   └── key_vault.py           # API key resolution: env var locally, Key Vault via managed identity in Azure
+│       │                              # (added during Layer 1 implementation — not in original plan)
 │       ├── cities.json                # List of cities polled (the "virtual sensors")
 │       ├── host.json
 │       ├── requirements.txt

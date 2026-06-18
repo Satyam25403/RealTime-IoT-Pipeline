@@ -29,6 +29,23 @@ ever touching the cloud. This is called out explicitly wherever it's relevant be
 
 ---
 
+## Implementation status
+
+| Layer | Status | Notes |
+|---|---|---|
+| 1 — Ingestion | **Implemented, mock-tested** | `ingestion/function_app/` — see section 3 implementation notes. Not yet run against the live Event Hub emulator (Docker unavailable in build environment) — see section 5a. |
+| 2 — Stream Processing | Planned (`.asaql` files are stubs) | |
+| 3 — Batch Transformation | Schemas defined (`schema_definitions.py`), notebooks are stubs | |
+| 4 — Hot Path Serving | Planned | |
+| 5 — Cold Path Serving | Planned | |
+| 6 — Security & Observability | Partially planned (KQL query stubs, IaC stubs) | |
+| Infra (Bicep) | Stubs only, not yet written | |
+
+This table is the single place to check what's real vs aspirational in this
+repo at any point — update it whenever a layer's status changes.
+
+---
+
 ## 2. Architecture overview
 
 ```
@@ -99,6 +116,42 @@ Partition count here is driven by downstream *parallelism*, not raw throughput:
 the per-city windowed queries. Partition key is `city_id`, which guarantees all
 events for a given city land on the same partition and stay in order — required
 for the rolling-average and anomaly windows to be correct per city.
+`cities.json` currently has 12 cities (24 API calls per poll cycle), well
+under the 60/min ceiling with room for retries — see
+`docs/openweathermap_api_reference.md` section 3 for the exact rate budget.
+
+**Implementation notes (Layer 1 is now built — see `ingestion/function_app/`):**
+- `shared/owm_client.py` classifies OWM error responses into fail-fast
+  (400/401/404 — no retry, since these are data or config errors, not
+  transient) versus retryable (429/5xx/network errors — exponential backoff,
+  3 attempts). A 401 is logged at ERROR with an explicit note that it likely
+  affects every city, not just the one being polled, since an invalid key
+  fails identically across the whole fleet.
+- `shared/enrichment.py`'s output dict keys are an exact 1:1 match with
+  `batch/databricks_notebooks/utils/schema_definitions.py`'s `BRONZE_SCHEMA`
+  field names — verified by an automated field-diff during development, not
+  just by eye. Any field OWM returns that isn't explicitly mapped still
+  survives as JSON inside `raw_payload_json`, so bronze stays genuinely
+  replayable even as the upstream API adds fields this code doesn't know
+  about yet.
+- `shared/eventhub_publisher.py` groups the poll cycle's events by `city_id`
+  before sending, since the SDK's `create_batch(partition_key=...)` ties one
+  batch to one partition key — sending one batch per distinct city per cycle
+  rather than one batch for the whole cycle. At this data volume that's a
+  handful of small batches, not a meaningful overhead, and it's what
+  actually enforces the partitioning decision above at the code level.
+- `shared/key_vault.py` resolves the API key from the `OWM_API_KEY` env var
+  locally, or from Key Vault via `DefaultAzureCredential` (resolving to the
+  Function's user-assigned managed identity in Azure — see Layer 6) when
+  `KEY_VAULT_URL` is set instead. Missing both is the one failure mode that
+  intentionally aborts the *entire* poll cycle rather than being isolated
+  per-city, since without a key no city can be polled at all — there's
+  nothing to isolate.
+- `TimerTriggerCityPoll/__init__.py` wires all of the above together with
+  per-city error isolation: a `CityFetchError` for one city is caught inside
+  the loop and logged, while the rest of the cycle's cities continue. This
+  was verified with a test simulating one failing city among three —
+  confirmed the other two still get enriched and published.
 
 ### Layer 2 — Stream Processing
 
@@ -264,6 +317,14 @@ and `docs/` governs the reasoning trail an evaluator would want to read.
 This validates ingestion and stream-processing logic against official Azure
 emulators before any cloud deployment.
 
+**Status: Layer 1 (`ingestion/function_app/`) is implemented and unit-tested.**
+Every component — OWM client retry/fail-fast classification, enrichment's
+field mapping against `BRONZE_SCHEMA`, the Event Hub publisher's per-city
+partition-key batching, and the Function entrypoint's per-city error
+isolation — was verified with mocked dependencies before ever touching the
+emulator, so the steps below are validating wiring and the real Event Hub
+protocol, not first-time logic checks.
+
 ```bash
 # 1. Start Event Hub emulator + Azurite (ADLS Gen2 stand-in)
 cd tests/local_dev
@@ -287,7 +348,21 @@ python test_publish_and_consume.py
 
 This proves the Function correctly enriches and publishes events, and that
 they can be consumed in the right shape — without needing Stream Analytics,
-Cosmos DB, or Synapse, none of which have full local emulators. Stream
+Cosmos DB, or Synapse, none of which have full local emulators.
+`tests/local_dev/test_publish_and_consume.py` calls the real
+`shared.eventhub_publisher.publish()` and `shared.enrichment.enrich()`
+functions (not reimplementations), so it's a true integration check — but
+it was written and syntax-checked, not yet run against a live emulator, since
+no Docker is available in the environment this was built in. Run
+`docker compose up -d` then the test yourself; if the emulator behaves
+differently than documented anywhere, that's the one part of Layer 1 still
+worth treating as unverified until you've actually seen it pass. Everything
+else in Layer 1 (retry/fail-fast classification, schema field mapping,
+partition-key batching, per-city error isolation) was verified directly with
+mocked dependencies during development — see Layer 1 implementation notes in
+section 3 above.
+
+Stream
 Analytics' windowing logic is instead validated via
 `stream_processing/local_emulation/pyspark_structured_streaming_equivalent.py`,
 a PySpark Structured Streaming job that implements the same hopping/sliding
