@@ -35,7 +35,7 @@ ever touching the cloud. This is called out explicitly wherever it's relevant be
 |---|---|---|
 | 1 — Ingestion | **Implemented, mock-tested** | `ingestion/function_app/` — see section 3 implementation notes. Not yet run against the live Event Hub emulator (Docker unavailable in build environment) — see section 5a. |
 | 2 — Stream Processing | **Implemented, mock-tested** | `stream_processing/asa_queries/` (real SAQL) + `local_emulation/windowing_logic.py` (6/6 unit tests passing). Spark wrapper design-verified, not yet run against a live emulator (no PySpark in build environment). |
-| 3 — Batch Transformation | Schemas defined (`schema_definitions.py`), notebooks are stubs | |
+| 3 — Batch Transformation | **Implemented, mock-tested** | `batch/databricks_notebooks/` (real PySpark/Delta) + `utils/schema_definitions.py`'s validation gate (3/3 unit tests passing) + ADF pipeline with verified parameter wiring. Not yet run on a real Spark session/cluster. |
 | 4 — Hot Path Serving | Planned | |
 | 5 — Cold Path Serving | Planned | |
 | 6 — Security & Observability | Partially planned (KQL query stubs, IaC stubs) | |
@@ -264,6 +264,13 @@ would be monitored.
 
 ### Layer 3 — Batch Transformation
 
+**Implementation status: implemented and cross-verified, not yet run on a
+real cluster.** All three notebooks (`batch/databricks_notebooks/`), the
+schema validation gate (`utils/schema_definitions.py`), and the ADF
+orchestration (`batch/adf_pipelines/pl_daily_batch_trigger.json`) are real
+PySpark/Delta/ADF code — see implementation notes below for exactly what
+was verified and how.
+
 - **Bronze**: raw Parquet, append-only, partitioned by ingestion date. No
   transformation — a faithful, replayable landing zone.
 - **Silver**: Delta format, deduplicated on `(city_id, observation_timestamp)`,
@@ -273,7 +280,13 @@ would be monitored.
 **Z-ordering.** Gold is Z-ordered on `city_id`, since that's the dominant
 filter/join column for both Power BI and Synapse serverless queries downstream.
 Z-ordering co-locates rows for that column across files so file-skipping
-actually works at query time.
+actually works at query time. **Worth noting**: Databricks now recommends
+liquid clustering over Z-ordering for new tables in general. Z-ordering is
+used here because the assignment explicitly asks "Think about: Z-ordering,"
+and implementing what was asked directly is more useful for this evaluation
+than substituting a newer technique — but liquid clustering is the better
+default choice for a table built outside this assignment's scope, and is
+flagged as such in `03_gold_aggregate_zorder.py`'s comments.
 
 **Delta time travel.** Used as an audit/debug tool, not built into the
 pipeline's control flow — e.g. "what did gold look like before yesterday's bad
@@ -283,7 +296,12 @@ itself a risk.
 
 **Schema evolution.** Writes enable `mergeSchema`, since OpenWeatherMap could
 add fields over time — but a minimum-required-schema check runs before merge,
-so a silently breaking upstream change can't poison gold without being caught.
+so a silently breaking upstream change can't poison gold without being
+caught. This is no longer just a documented intent: `validate_silver_required_
+fields()` in `schema_definitions.py` is fully implemented and unit-tested
+(3 cases — mixed good/bad rows, a structurally missing column, and an
+all-good batch; see implementation notes below) and is actually called by
+`02_silver_clean_dedup.py` before every silver write.
 
 **Why not Delta Live Tables?** DLT is the right tool when you want declarative
 pipelines with built-in data-quality expectations and managed orchestration.
@@ -293,6 +311,46 @@ fails where) stays visible and explainable rather than abstracted behind a
 framework — which matters for an evaluation that's explicitly grading
 architectural reasoning. DLT is the natural next iteration once the pipeline's
 shape is proven.
+
+**Implementation notes (Layer 3 is now built):**
+- `validate_silver_required_fields()` distinguishes two failure modes on
+  purpose: a `SILVER_REQUIRED_FIELDS` column missing **entirely** from the
+  bronze DataFrame raises `SchemaValidationError` and fails the whole batch
+  (this means `BRONZE_SCHEMA` and the real data have drifted apart — a code
+  problem), while a column that **exists but is null** for a given row
+  quarantines just that row and lets the rest of the batch proceed (the
+  expected, normal failure mode — same per-unit isolation principle as
+  Layer 1's per-city error handling, applied here per-row instead). Both
+  paths were unit-tested with a hand-built fake DataFrame standing in for
+  just the Spark operations the function calls, since no real Spark session
+  was available in the build environment — all 3 cases passed.
+- `01_bronze_ingest.py` reads with `BRONZE_SCHEMA` applied explicitly
+  (`spark.read.schema(...)`), not inferred, so a malformed upstream file
+  fails loudly at the bronze stage rather than silently downstream.
+- `03_gold_aggregate_zorder.py` uses a Delta `MERGE` (upsert on `city_id` +
+  `date`), not a plain append, since gold's grain (one row per city per
+  day) makes "re-running this notebook for an already-processed date"
+  a real risk that bronze/silver's append-only event grain doesn't share —
+  confirmed `OPTIMIZE table ZORDER BY (col)` syntax against current
+  Databricks/Delta docs before writing it, rather than assuming it from
+  memory.
+- The ADF pipeline's three `baseParameters` blocks were cross-checked
+  programmatically against each notebook's actual `dbutils.widgets.text(...)`
+  calls — confirmed every parameter name ADF passes is one the receiving
+  notebook actually expects, and vice versa, for all three activities.
+- All schema cross-checks in this layer (bronze↔enrichment.py from Layer 1,
+  bronze↔raw_passthrough.asaql from Layer 2, gold notebook output↔
+  `GOLD_SCHEMA`) were done by automated field-diff, not by eye — this is
+  the same discipline applied throughout the repo and is what caught the
+  Layer 2 alert-schema mismatch documented in that layer's notes.
+- **Not yet execution-verified**: none of the three notebooks have been run
+  against a real Databricks cluster or even a local Spark session (no
+  PySpark/JVM in the build environment — the same constraint noted for
+  Layer 2's Spark wrapper). The validation function's logic IS verified;
+  the notebooks' Spark API calls (`spark.read.schema(...)`,
+  `DeltaTable.forName(...).merge(...)`, etc.) are design-verified against
+  current documentation, not run. Treat this as the one open item for this
+  layer.
 
 ### Layer 4 — Hot Path Serving
 

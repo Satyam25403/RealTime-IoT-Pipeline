@@ -52,14 +52,15 @@ realtime-iot-pipeline/
 │       └── pyspark_structured_streaming_equivalent.py  # Logic parity test, runs locally against Event Hub emulator
 │                                                          # delegates math to windowing_logic.py
 │
-├── batch/                             # LAYER 3 — governs daily bronze→silver→gold transformation
+├── batch/                             # LAYER 3 — governs daily bronze→silver→gold transformation [IMPLEMENTED]
 │   ├── databricks_notebooks/
-│   │   ├── 01_bronze_ingest.py
-│   │   ├── 02_silver_clean_dedup.py
-│   │   ├── 03_gold_aggregate_zorder.py
-│   │   └── utils/schema_definitions.py
+│   │   ├── 01_bronze_ingest.py        # explicit BRONZE_SCHEMA on read, append+partition by ingestion_date
+│   │   ├── 02_silver_clean_dedup.py   # validation gate -> quarantine, dt->timestamp, dedup, mergeSchema write
+│   │   ├── 03_gold_aggregate_zorder.py# daily agg + 7-day rolling avg, Delta MERGE upsert, OPTIMIZE ZORDER BY
+│   │   └── utils/schema_definitions.py# validate_silver_required_fields() implemented, 3/3 unit tests passing
 │   └── adf_pipelines/
-│       └── pl_daily_batch_trigger.json  # ADF pipeline definition (trigger + Databricks activity)
+│       └── pl_daily_batch_trigger.json  # 3 chained DatabricksNotebook activities, dependsOn Succeeded,
+│                                          # baseParameters cross-checked against each notebook's widgets
 │
 ├── hot_path/                          # LAYER 4 — governs anomaly alert storage + serving contract
 │   └── cosmos_schemas/

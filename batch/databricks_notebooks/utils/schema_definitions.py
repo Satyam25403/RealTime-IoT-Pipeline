@@ -167,19 +167,67 @@ GOLD_SCHEMA = StructType([
 ])
 
 
+class SchemaValidationError(Exception):
+    """Raised when a bronze batch is missing one of SILVER_REQUIRED_FIELDS
+    entirely (the column doesn't exist at all). This is a STRUCTURAL
+    failure — almost certainly an upstream change to enrichment.py or the
+    OWM API response shape that BRONZE_SCHEMA hasn't been updated to match
+    — and the whole batch fails fast rather than silently writing partial
+    data. This is different from a row having a NULL value in a column that
+    DOES exist, which is handled per-row by routing to quarantine instead
+    (see validate_silver_required_fields)."""
+
+
 def validate_silver_required_fields(df):
     """
-    PLANNED — called from 02_silver_clean_dedup.py before the mergeSchema
-    write. Checks every column in SILVER_REQUIRED_FIELDS is present AND
-    non-null for every row; rows failing the check should be split off to a
+    Called from 02_silver_clean_dedup.py before the mergeSchema write.
+    Checks every column in SILVER_REQUIRED_FIELDS is present AND non-null
+    for every row; rows failing the null check are split off to a
     quarantine path (e.g. silver/_quarantine/) rather than dropped silently
     or allowed to corrupt the dedup key.
 
-    TODO:
-        missing_cols = [c for c in SILVER_REQUIRED_FIELDS if c not in df.columns]
-        if missing_cols: raise SchemaValidationError(...)  # whole batch fails fast — likely an upstream schema change
-        bad_rows = df.filter(" OR ".join(f"{c} IS NULL" for c in SILVER_REQUIRED_FIELDS))
-        good_rows = df.exceptAll(bad_rows)
-        return good_rows, bad_rows
+    Two distinct failure modes, handled differently on purpose:
+      1. A column in SILVER_REQUIRED_FIELDS doesn't exist on df at all ->
+         SchemaValidationError, whole batch fails fast. This means bronze's
+         actual shape no longer matches BRONZE_SCHEMA, which is a code
+         problem (enrichment.py and schema_definitions.py have drifted),
+         not a data-quality problem -- continuing would silently write
+         columns that don't mean what the rest of the pipeline assumes.
+      2. A column exists but is NULL for a given row -> that row is
+         quarantined, the rest of the batch proceeds. This is the normal,
+         expected failure mode (e.g. one city's poll returned a partial API
+         response) and must NOT abort the whole day's batch over one bad row
+         -- same per-unit isolation principle as Layer 1's per-city error
+         handling, applied here at the row level instead of the city level.
+
+    Args:
+        df: a Spark DataFrame matching (a superset of) BRONZE_SCHEMA.
+
+    Returns:
+        (good_rows, bad_rows) -- two DataFrames partitioning df. good_rows
+        has no nulls in any SILVER_REQUIRED_FIELDS column; bad_rows is
+        everything else, intended for 02_silver_clean_dedup.py to write to
+        a quarantine path rather than discard.
+
+    Raises:
+        SchemaValidationError: if any SILVER_REQUIRED_FIELDS column is
+            entirely absent from df.columns.
     """
-    raise NotImplementedError("TODO: implement per function docstring")
+    missing_cols = [c for c in SILVER_REQUIRED_FIELDS if c not in df.columns]
+    if missing_cols:
+        raise SchemaValidationError(
+            f"bronze batch is missing required column(s) entirely: {missing_cols}. "
+            f"This means BRONZE_SCHEMA and the actual bronze data have drifted apart -- "
+            f"check enrichment.py still produces these fields, or that "
+            f"SILVER_REQUIRED_FIELDS/BRONZE_SCHEMA in this file haven't gone stale."
+        )
+
+    from functools import reduce
+    from operator import or_
+
+    null_conditions = [df[c].isNull() for c in SILVER_REQUIRED_FIELDS]
+    is_bad_row = reduce(or_, null_conditions)
+
+    bad_rows = df.filter(is_bad_row)
+    good_rows = df.filter(~is_bad_row)
+    return good_rows, bad_rows

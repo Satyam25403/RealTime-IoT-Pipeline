@@ -1,7 +1,65 @@
 {
   "name": "pl_daily_batch_trigger",
-  "description": "PLANNED — daily ADF pipeline. Trigger: schedule, once per day. Single activity: DatabricksNotebook, runs 01_bronze_ingest -> 02_silver_clean_dedup -> 03_gold_aggregate_zorder in sequence. On failure: alert via Log Analytics (see docs/kql/adf_pipeline_failures.kql).",
+  "_comment": "Layer 3 daily orchestration. Trigger (not shown here, see infra/bicep/streamanalytics.bicep's sibling ADF trigger module once written): schedule trigger, once per day, passing windowStartTime as run_date to all three activities so a manual backfill run can override the date independently of 'today'. On failure: any activity's failure surfaces in ADFPipelineRun, queried by docs/kql/adf_pipeline_failures.kql.",
   "properties": {
-    "activities": []
+    "activities": [
+      {
+        "name": "bronze_ingest",
+        "type": "DatabricksNotebook",
+        "linkedServiceName": { "referenceName": "ls_databricks", "type": "LinkedServiceReference" },
+        "typeProperties": {
+          "notebookPath": "/Repos/production/realtime-iot-pipeline/batch/databricks_notebooks/01_bronze_ingest",
+          "baseParameters": {
+            "raw_cold_path_input": "@pipeline().parameters.raw_cold_path_input",
+            "bronze_output_path": "@pipeline().parameters.bronze_output_path",
+            "run_date": "@pipeline().parameters.run_date"
+          }
+        },
+        "policy": { "timeout": "0.01:00:00", "retry": 1, "retryIntervalInSeconds": 60 }
+      },
+      {
+        "name": "silver_clean_dedup",
+        "type": "DatabricksNotebook",
+        "dependsOn": [
+          { "activity": "bronze_ingest", "dependencyConditions": ["Succeeded"] }
+        ],
+        "linkedServiceName": { "referenceName": "ls_databricks", "type": "LinkedServiceReference" },
+        "typeProperties": {
+          "notebookPath": "/Repos/production/realtime-iot-pipeline/batch/databricks_notebooks/02_silver_clean_dedup",
+          "baseParameters": {
+            "bronze_input_path": "@pipeline().parameters.bronze_output_path",
+            "silver_output_path": "@pipeline().parameters.silver_output_path",
+            "quarantine_path": "@pipeline().parameters.quarantine_path",
+            "run_date": "@pipeline().parameters.run_date"
+          }
+        },
+        "policy": { "timeout": "0.01:00:00", "retry": 1, "retryIntervalInSeconds": 60 }
+      },
+      {
+        "name": "gold_aggregate_zorder",
+        "type": "DatabricksNotebook",
+        "dependsOn": [
+          { "activity": "silver_clean_dedup", "dependencyConditions": ["Succeeded"] }
+        ],
+        "linkedServiceName": { "referenceName": "ls_databricks", "type": "LinkedServiceReference" },
+        "typeProperties": {
+          "notebookPath": "/Repos/production/realtime-iot-pipeline/batch/databricks_notebooks/03_gold_aggregate_zorder",
+          "baseParameters": {
+            "silver_input_path": "@pipeline().parameters.silver_output_path",
+            "gold_table_name": "@pipeline().parameters.gold_table_name",
+            "run_date": "@pipeline().parameters.run_date"
+          }
+        },
+        "policy": { "timeout": "0.02:00:00", "retry": 1, "retryIntervalInSeconds": 60 }
+      }
+    ],
+    "parameters": {
+      "raw_cold_path_input": { "type": "string", "defaultValue": "/mnt/adls/raw-cold-path/" },
+      "bronze_output_path": { "type": "string", "defaultValue": "/mnt/adls/bronze/weather_events/" },
+      "silver_output_path": { "type": "string", "defaultValue": "/mnt/adls/silver/weather_events/" },
+      "quarantine_path": { "type": "string", "defaultValue": "/mnt/adls/silver/_quarantine/weather_events/" },
+      "gold_table_name": { "type": "string", "defaultValue": "main.weather_lakehouse.gold_city_daily_stats" },
+      "run_date": { "type": "string", "defaultValue": "" }
+    }
   }
 }
