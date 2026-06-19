@@ -14,6 +14,16 @@ to get wrong, not arithmetic.
 Each function here mirrors exactly one .asaql query in ../asa_queries/ —
 the docstring on each function names which one, so drift between "what the
 real ASA query does" and "what we verified locally" is easy to spot.
+
+Note on PartitionId: the real .asaql files group by `city_id, PartitionId`
+(required once the README's 4-partition Event Hub topology was accounted
+for correctly — see the header comments in anomaly_detection.asaql and
+rolling_averages.asaql for why). This file's functions group only by
+city_id, which is correct for the AGGREGATION MATH itself — a window's
+average/max/min over a set of events doesn't depend on which Event Hub
+partition those events physically arrived on, only on which city and time
+window they belong to. PartitionId is an ASA runtime/parallelism concern,
+not an arithmetic one, so it's intentionally not modeled here.
 """
 
 from typing import Optional

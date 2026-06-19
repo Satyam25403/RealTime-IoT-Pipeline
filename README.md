@@ -36,7 +36,7 @@ ever touching the cloud. This is called out explicitly wherever it's relevant be
 | 1 — Ingestion | **Implemented, mock-tested** | `ingestion/function_app/` — see section 3 implementation notes. Not yet run against the live Event Hub emulator (Docker unavailable in build environment) — see section 5a. |
 | 2 — Stream Processing | **Implemented, mock-tested** | `stream_processing/asa_queries/` (real SAQL) + `local_emulation/windowing_logic.py` (6/6 unit tests passing). Spark wrapper design-verified, not yet run against a live emulator (no PySpark in build environment). |
 | 3 — Batch Transformation | **Implemented, mock-tested** | `batch/databricks_notebooks/` (real PySpark/Delta) + `utils/schema_definitions.py`'s validation gate (3/3 unit tests passing) + ADF pipeline with verified parameter wiring. Not yet run on a real Spark session/cluster. |
-| 4 — Hot Path Serving | Planned | |
+| 4 — Hot Path Serving | **Implemented, design-verified** | `infra/bicep/cosmosdb.bicep` (serverless + Synapse Link). Two real bugs caught and fixed in the upstream `.asaql` files (missing `id` field, missing `PartitionId` handling) plus a documentation correction (Power BI uses Synapse Link/DirectQuery, not Change Feed directly). No Bicep CLI available to validate syntax — checked against current docs only. |
 | 5 — Cold Path Serving | Planned | |
 | 6 — Security & Observability | Partially planned (KQL query stubs, IaC stubs) | |
 | Infra (Bicep) | Stubs only, not yet written | |
@@ -73,10 +73,10 @@ repo at any point — update it whenever a layer's status changes.
  │ LAYER 4 — Hot Path        │        │ LAYER 3 — Batch (ADF + Databricks)│
  │ Cosmos DB (serverless)    │        │ Bronze → Silver → Gold (Delta)    │
  │ key = city_id             │        │ Z-ordered gold, Unity Catalog     │
- │   │ Change Feed            │        └────────────────┬───────────────┘
+ │   │ Synapse Link           │        └────────────────┬───────────────┘
  │   ▼                        │                          ▼
  │ Power BI live dashboard    │        ┌──────────────────────────────────┐
- │ (Change Feed + push API)   │        │ LAYER 5 — Cold Path Serving       │
+ │ (DirectQuery + push API)   │        │ LAYER 5 — Cold Path Serving       │
  └────────────────────────────┘        │ Synapse serverless SQL            │
                                         │ OPENROWSET over gold Delta tables │
                                         │   │ DirectQuery                   │
@@ -369,11 +369,95 @@ such, not a universal "serverless is always better" claim.
 historical row retention and total dataset size, and they don't support
 DirectQuery-style ad hoc slicing — they're a write-only stream into a fixed
 schema. That's exactly why the assignment specifies *two separate* Power BI
-artifacts rather than one: a Change Feed–driven dashboard (full read access to
-Cosmos DB, can slice freely) for the live alert view, and a push dataset (a
-small number of pre-aggregated metric tiles, not arbitrary queries) for
+artifacts rather than one: a DirectQuery-driven dashboard (full read access
+to Cosmos DB, can slice freely) for the live alert view, and a push dataset
+(a small number of pre-aggregated metric tiles, not arbitrary queries) for
 real-time city metrics. Trying to do both through one push dataset would hit
 the retention/size cap quickly.
+
+**Correction from the original plan**: Power BI does **not** connect to
+Cosmos DB's Change Feed directly — there's no native Change Feed connector.
+The actual mechanism for "live alert dashboard, no ETL, full query
+flexibility" is **Azure Synapse Link**: enabling analytical storage on the
+`anomaly_alerts` container, then connecting Power BI via DirectQuery through
+Synapse Link, which queries live data without consuming the container's own
+transactional RU budget. The alternative is the native Cosmos DB connector
+for Power BI, but that's import-mode only and DOES consume transactional
+RUs — a meaningfully worse fit given the serverless/cost-conscious decision
+above. Synapse Link is the right choice here and is now implemented in
+`infra/bicep/cosmosdb.bicep` (`enableAnalyticalStorage: true` at the account
+level, `analyticalStorageTtl: -1` on the container — both are required;
+enabling one without the other does nothing). Worth flagging since it's a
+genuinely one-way decision: per Microsoft's own docs, once Synapse Link is
+enabled for an account it can't be disabled — this is called out as an
+explicit comment in the Bicep file itself, not just here.
+
+**Implementation status: implemented, design-verified, not deployed.**
+`infra/bicep/cosmosdb.bicep` is real Bicep (account, database, container with
+serverless capability, Synapse Link analytical storage, and an indexing
+policy), and `stream_processing/asa_queries/anomaly_detection.asaql` /
+`rolling_averages.asaql` both received real corrections during this layer's
+implementation — see notes below. No Bicep CLI was available in the build
+environment to run `az bicep build` for true syntax validation; this file
+was checked against current Microsoft documentation examples and passed a
+basic brace/bracket/paren balance check, which catches typos but not
+semantic errors. Treat actual deployment as the open item for this layer,
+same pattern as the Spark-dependent layers above.
+
+**Implementation notes (real corrections made while building this layer):**
+- **Missing document `id` field.** The original `anomaly_detection.asaql`
+  had no `id` column. Per Microsoft's docs, Stream Analytics' Cosmos DB
+  output upserts based on the outgoing document's `id` field — without one,
+  Cosmos either generates a random id (breaking idempotency: reprocessing
+  the same window would create a duplicate document instead of updating the
+  existing one) or risks an unintended collision. Since this is a windowed
+  aggregate (not a passthrough), there's no single input event to key off
+  via `GetMetadataPropertyValue(..., 'EventId')` the way a passthrough
+  query could — so `id` is now built deterministically as
+  `{city_id}-{window_end_unix_seconds}`, which is naturally unique per
+  window and naturally idempotent on rerun. `alert_document_schema.json`
+  was updated to match and its old "guid, generated at write time" comment
+  (which was never accurate even as a plan) corrected.
+- **Missing `PartitionId` handling on a multi-partition input.** Per
+  Microsoft's docs, "if input stream has more than one partition, the OVER
+  clause must be used together with the PARTITION BY clause, and PartitionId
+  must be specified as part of TIMESTAMP BY OVER columns." Our Event Hub has
+  4 partitions (README Layer 1 decision) — the original `OVER city_id` alone
+  in both windowed queries was invalid against that input. Fixed in both
+  `anomaly_detection.asaql` and `rolling_averages.asaql` to
+  `OVER city_id, PartitionId` with an explicit `PARTITION BY PartitionId` on
+  `FROM`, and `PartitionId` added to each `GROUP BY`. This doesn't change the
+  aggregation arithmetic (a window is still scoped per city) — confirmed by
+  re-reading `windowing_logic.py`'s docstring, which already noted this
+  distinction; a comment was added there making the relationship explicit.
+- **Output partition routing.** Per Microsoft's docs, "the partition key
+  [for a Cosmos DB output] is based on the PARTITION BY clause in the
+  query," not solely the container's own configured partition key path.
+  `cosmosdb.bicep`'s container partition key path (`/city_id`) must match
+  what the query's output partitioning actually produces — documented as an
+  explicit cross-file dependency in both files' comments, since this is the
+  kind of thing that fails silently (writes succeed to the wrong logical
+  partition) rather than throwing an obvious error if the two drift apart.
+- **Change Feed was the wrong mechanism.** The original README/plan said
+  Power BI reads Cosmos DB "via Change Feed." This turned out to be
+  imprecise to the point of being wrong: there's no Power BI Change Feed
+  connector. The real mechanism is Synapse Link + DirectQuery (see the
+  correction above) — Change Feed is a real Cosmos DB capability, but it's
+  the mechanism Synapse Link's analytical-store auto-sync uses *internally*
+  to replace what would otherwise require a custom Change-Feed-triggered
+  ETL pipeline, not something Power BI itself consumes. Fixed across
+  README.md, `powerbi/README.md`, and the architecture diagram.
+- **Verification near-miss worth noting honestly**: a field-diff script
+  comparing `anomaly_detection.asaql`'s output to
+  `alert_document_schema.json` initially reported a mismatch — but the bug
+  was in the validation script itself (a naive `text.split("SELECT")` was
+  tripped up by the word "SELECT" appearing inside this query file's own
+  comment headers, e.g. "the original version of this file's SELECT...").
+  Fixed the script to strip comment lines before splitting, re-ran, and
+  confirmed a genuine exact match (10/10 fields). Mentioning this because
+  it's a real example of why a single passing (or failing) automated check
+  shouldn't be trusted blindly — the check itself needs to be sane-checked
+  when its result is surprising.
 
 ### Layer 5 — Cold Path Serving
 

@@ -62,9 +62,11 @@ realtime-iot-pipeline/
 │       └── pl_daily_batch_trigger.json  # 3 chained DatabricksNotebook activities, dependsOn Succeeded,
 │                                          # baseParameters cross-checked against each notebook's widgets
 │
-├── hot_path/                          # LAYER 4 — governs anomaly alert storage + serving contract
+├── hot_path/                          # LAYER 4 — governs anomaly alert storage + serving contract [IMPLEMENTED]
 │   └── cosmos_schemas/
-│       └── alert_document_schema.json
+│       └── alert_document_schema.json # matches anomaly_detection.asaql exactly, incl. deterministic id field
+│                                        # (real Cosmos resources are in infra/bicep/cosmosdb.bicep, not here --
+│                                        #  this folder holds the document CONTRACT, not the provisioning)
 │
 ├── cold_path/                         # LAYER 5 — governs historical query surface
 │   └── synapse_sql/

@@ -17,6 +17,16 @@
 -- city gets its own independent watermark, so one slow/quiet city never
 -- blocks the other 11.
 --
+-- CORRECTION (same fix applied to anomaly_detection.asaql -- see that
+-- file's header for the full explanation): our Event Hub input has 4
+-- partitions, and Microsoft's docs require `PartitionId` to be included in
+-- the OVER clause whenever the input has more than one partition, paired
+-- with an explicit `PARTITION BY PartitionId` on FROM. The original
+-- `OVER city_id` alone was invalid against this 4-partition input --
+-- fixed below. Unlike anomaly_detection.asaql, this query's output goes to
+-- a Power BI push dataset, not Cosmos DB, so there's no id/upsert concern
+-- here -- only the PartitionId requirement applies.
+--
 -- Late arrival / out-of-order tolerance are NOT set in this query file —
 -- those are JOB-LEVEL settings (Event Ordering tab in the Azure portal, or
 -- via `az stream-analytics job update --events-late-arrival-max-delay-time
@@ -41,7 +51,9 @@ SELECT
 INTO
     RollingAveragesOutput   -- Power BI push dataset (Layer 4 real-time city metrics)
 FROM
-    EventHubInput TIMESTAMP BY poll_timestamp OVER city_id
+    EventHubInput TIMESTAMP BY poll_timestamp OVER city_id, PartitionId
+    PARTITION BY PartitionId
 GROUP BY
     city_id,
+    PartitionId,
     HoppingWindow(minute, 10, 2)

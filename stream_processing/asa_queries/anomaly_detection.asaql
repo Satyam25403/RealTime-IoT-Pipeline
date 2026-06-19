@@ -15,11 +15,37 @@
 -- 1-5 scale — see docs/openweathermap_api_reference.md, NOT the EPA 0-500
 -- scale) hits the worst category.
 --
--- Same OVER city_id substream reasoning as rolling_averages.asaql applies
--- here — one city's data gap must not delay another city's anomaly signal.
+-- CORRECTION from the original version of this file: our Event Hub input
+-- has 4 partitions (README Layer 1 decision). Per Microsoft's own docs,
+-- "if input stream has more than one partition, the OVER clause must be
+-- used together with the PARTITION BY clause, and PartitionId must be
+-- specified as part of TIMESTAMP BY OVER columns" -- the original
+-- `OVER city_id` alone is invalid against a 4-partition input. Fixed below
+-- to `OVER city_id, PartitionId` with an explicit `PARTITION BY PartitionId`
+-- on the FROM clause.
+--
+-- `id` field added: Stream Analytics' Cosmos DB output UPSERTS based on the
+-- `id` field on the outgoing document -- if a query doesn't emit one,
+-- Cosmos either generates a random one (breaking idempotency on
+-- reprocessing) or risks an unintended collision. Since this query is a
+-- WINDOWED AGGREGATE (not a passthrough), there's no single underlying
+-- input event to key off via GetMetadataPropertyValue(..., 'EventId') --
+-- instead, id is built deterministically from (city_id, window end time),
+-- which is naturally unique per window AND naturally idempotent: rerunning
+-- the same window over the same data produces the same id, so Cosmos
+-- upserts rather than duplicates, matching Azure's documented optimistic
+-- upsert behavior for this output type.
+--
+-- `PARTITION BY city_id` on the OUTPUT side (the final SELECT's INTO target)
+-- is what actually determines the Cosmos DB write partition routing -- per
+-- Microsoft's docs, "the partition key is based on the PARTITION BY clause
+-- in the query," not solely the container's own configured partition key
+-- path. This must match the container's /city_id partition key path
+-- (see infra/bicep/cosmosdb.bicep) or writes will fail.
 -- =============================================================================
 
 SELECT
+    CONCAT(city_id, '-', CAST(DATEDIFF(second, '1970-01-01T00:00:00Z', System.Timestamp()) AS NVARCHAR(MAX))) AS id,
     city_id,
     MAX(temp) AS window_max_temp,
     MIN(temp) AS window_min_temp,
@@ -34,9 +60,11 @@ INTO
                            -- whose fields match this SELECT exactly, including the two
                            -- *_triggered flags computed here rather than re-derived downstream)
 FROM
-    EventHubInput TIMESTAMP BY poll_timestamp OVER city_id
+    EventHubInput TIMESTAMP BY poll_timestamp OVER city_id, PartitionId
+    PARTITION BY PartitionId
 GROUP BY
     city_id,
+    PartitionId,
     SlidingWindow(minute, 15)
 HAVING
     (MAX(temp) - MIN(temp)) > 8   -- degrees C, swing within a 15-min window

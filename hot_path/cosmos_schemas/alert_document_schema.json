@@ -1,7 +1,8 @@
 {
   "_comment": "Layer 4 alert document shape, written by ASA's anomaly_detection.asaql. Matches that query's actual SELECT output field-for-field — see README section 3 (Cosmos DB partition key decision) for why city_id is the partition key.",
   "_design_note": "One document per (city_id, window) where the HAVING clause fired, NOT one document per metric. The trigger can be a temp swing, an AQI breach, or both at once in the same window -- 'temperature_swing' and 'aqi_threshold' booleans flag which condition(s) actually fired, rather than forcing a single-metric model that can't represent a row where both fired together.",
-  "id": "<guid, generated at write time, not by ASA itself>",
+  "_id_note": "id is built deterministically by the query as city_id + '-' + unix-epoch-seconds-of-window-end, NOT a random GUID -- this was a real correction made during Layer 4 implementation. Stream Analytics' Cosmos DB output upserts based on the id field; a windowed aggregate query has no single underlying input event to key off (unlike GetMetadataPropertyValue's EventId, which only applies to passthrough queries), so the id must be derived from the grouping key and window boundary instead. This also makes reprocessing idempotent: the same window over the same data always produces the same id, so a rerun upserts rather than duplicates.",
+  "id": "<string, format: '{city_id}-{window_end_unix_seconds}', e.g. 'hyderabad-1750000200'>",
   "city_id": "<partition key>",
   "detected_at": "<ISO8601 timestamp, from System.Timestamp() -- the window end time>",
   "window_max_temp": "<number, degrees C>",
