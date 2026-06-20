@@ -49,6 +49,12 @@ def enrich(raw: dict, city: dict) -> dict:
     main = weather.get("main", {}) or {}
     wind = weather.get("wind", {}) or {}
     clouds = weather.get("clouds", {}) or {}
+    coord = weather.get("coord", {}) or {}  # same null-vs-absent guard as every other nested dict here —
+                                              # OWM can return "coord": null explicitly, not just omit the key,
+                                              # and weather.get("coord", {}) only supplies the {} default when
+                                              # the key is ABSENT, not when it's present-but-null. This was a
+                                              # real gap (caught in code review): every other nested accessor in
+                                              # this function already had the "or {}" guard; this one didn't.
     weather_list = weather.get("weather", []) or []
     weather_first = weather_list[0] if weather_list else {}
 
@@ -69,8 +75,8 @@ def enrich(raw: dict, city: dict) -> dict:
 
         # --- Current Weather API fields [W] ---
         "dt": weather.get("dt"),
-        "lat": weather.get("coord", {}).get("lat", city.get("lat")),
-        "lon": weather.get("coord", {}).get("lon", city.get("lon")),
+        "lat": coord.get("lat", city.get("lat")),
+        "lon": coord.get("lon", city.get("lon")),
         "temp": main.get("temp"),
         "feels_like": main.get("feels_like"),
         "temp_min": main.get("temp_min"),

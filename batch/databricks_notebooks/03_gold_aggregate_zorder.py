@@ -100,7 +100,14 @@ gold_rows = daily_stats.join(rolling_avg, on="city_id", how="left")
 gold_columns = [f.name for f in GOLD_SCHEMA.fields]
 gold_rows = gold_rows.select(*gold_columns)
 
-print(f"computed gold aggregates for {gold_rows.count()} cities on {run_date}")
+# Computed once here and reused below -- the original version called
+# gold_rows.count() a second time in the final exit message, AFTER the
+# OPTIMIZE step, triggering an unnecessary second full scan (caught in code
+# review). Not a correctness bug -- the row count doesn't change between
+# here and the exit message -- just a wasted scan on a table that's about
+# to be Z-ordered anyway.
+gold_row_count = gold_rows.count()
+print(f"computed gold aggregates for {gold_row_count} cities on {run_date}")
 
 # COMMAND ----------
 
@@ -147,4 +154,4 @@ else:
 spark.sql(f"OPTIMIZE {gold_table_name} ZORDER BY (city_id)")
 print(f"Z-ordered {gold_table_name} on city_id")
 
-dbutils.notebook.exit(f"merged_{gold_rows.count()}_rows_for_{run_date}")
+dbutils.notebook.exit(f"merged_{gold_row_count}_rows_for_{run_date}")

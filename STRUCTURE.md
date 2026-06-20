@@ -68,9 +68,11 @@ realtime-iot-pipeline/
 │                                        # (real Cosmos resources are in infra/bicep/cosmosdb.bicep, not here --
 │                                        #  this folder holds the document CONTRACT, not the provisioning)
 │
-├── cold_path/                         # LAYER 5 — governs historical query surface
+├── cold_path/                         # LAYER 5 — governs historical query surface [IMPLEMENTED]
 │   └── synapse_sql/
-│       └── create_external_tables_openrowset.sql
+│       └── create_external_tables_openrowset.sql  # gold = CREATE EXTERNAL TABLE (unpartitioned, safe);
+│                                                      # includes documented VIEW-pattern template for any
+│                                                      # future partitioned source (bronze/silver, if ever exposed)
 │
 ├── powerbi/
 │   └── README.md                      # Describes the 2 PBI artifacts: push dataset + DirectQuery report

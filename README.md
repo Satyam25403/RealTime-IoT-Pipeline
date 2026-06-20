@@ -33,11 +33,11 @@ ever touching the cloud. This is called out explicitly wherever it's relevant be
 
 | Layer | Status | Notes |
 |---|---|---|
-| 1 — Ingestion | **Implemented, mock-tested** | `ingestion/function_app/` — see section 3 implementation notes. Not yet run against the live Event Hub emulator (Docker unavailable in build environment) — see section 5a. |
+| 1 — Ingestion | **Implemented, mock-tested, code-reviewed** | `ingestion/function_app/` — see section 3 implementation notes. External code review caught a real per-city-isolation gap (unguarded `coord: null` crash) — fixed with both a targeted null-safety fix and a broader catch-all. Not yet run against the live Event Hub emulator (Docker unavailable in build environment) — see section 5a. |
 | 2 — Stream Processing | **Implemented, mock-tested** | `stream_processing/asa_queries/` (real SAQL) + `local_emulation/windowing_logic.py` (6/6 unit tests passing). Spark wrapper design-verified, not yet run against a live emulator (no PySpark in build environment). |
-| 3 — Batch Transformation | **Implemented, mock-tested** | `batch/databricks_notebooks/` (real PySpark/Delta) + `utils/schema_definitions.py`'s validation gate (3/3 unit tests passing) + ADF pipeline with verified parameter wiring. Not yet run on a real Spark session/cluster. |
+| 3 — Batch Transformation | **Implemented, mock-tested, code-reviewed** | `batch/databricks_notebooks/` (real PySpark/Delta) + `utils/schema_definitions.py`'s validation gate (3/3 unit tests passing) + ADF pipeline with verified parameter wiring. External code review caught a critical ordering bug in the silver notebook that would have failed every single run — fixed and re-verified. Not yet run on a real Spark session/cluster. |
 | 4 — Hot Path Serving | **Implemented, design-verified** | `infra/bicep/cosmosdb.bicep` (serverless + Synapse Link). Two real bugs caught and fixed in the upstream `.asaql` files (missing `id` field, missing `PartitionId` handling) plus a documentation correction (Power BI uses Synapse Link/DirectQuery, not Change Feed directly). No Bicep CLI available to validate syntax — checked against current docs only. |
-| 5 — Cold Path Serving | Planned | |
+| 5 — Cold Path Serving | **Implemented, design-verified** | `cold_path/synapse_sql/` (real T-SQL, `CREATE EXTERNAL TABLE` for unpartitioned gold + a documented view-pattern template for any future partitioned source) + `infra/bicep/synapse.bicep` (Entra-only auth, no dedicated pool). Caught a real Microsoft-documented restriction (external tables on partitioned Delta folders can destabilize the serverless pool) before it became a bug. Not deployed — no Bicep CLI/Synapse workspace available. |
 | 6 — Security & Observability | Partially planned (KQL query stubs, IaC stubs) | |
 | Infra (Bicep) | Stubs only, not yet written | |
 
@@ -152,6 +152,30 @@ under the 60/min ceiling with room for retries — see
   the loop and logged, while the rest of the cycle's cities continue. This
   was verified with a test simulating one failing city among three —
   confirmed the other two still get enriched and published.
+
+**Code review findings (external review, both confirmed and fixed):**
+- **Per-city isolation gap.** The loop originally only caught
+  `CityFetchError`, not `Exception` broadly. A real, reproducible crash was
+  identified: `enrichment.py`'s `weather.get("coord", {}).get("lat", ...)`
+  assumed `.get("coord", {})` supplies the `{}` default whenever `coord`
+  isn't a usable dict — but that default only fires when the key is
+  **absent**. If OWM returns `"coord": null` explicitly (a real, if rare,
+  API behavior), the key exists with value `None`, `.get()` returns `None`,
+  and the chained `.get("lat", ...)` raises an unguarded `AttributeError`
+  that the original `except CityFetchError` couldn't catch — crashing the
+  *entire* poll cycle, all cities, not just one. Reproduced this exactly
+  with a `"coord": None` fixture before fixing. Fixed two ways,
+  deliberately: (1) `enrichment.py` now guards `coord` with the same
+  `or {}` pattern already used for every other nested dict in that
+  function (an inconsistency, not a systemic gap — every other accessor
+  already had this guard), and (2) `__init__.py`'s loop now also has a
+  broad `except Exception` fallback, specifically so the per-city
+  isolation *property* holds even for the next failure mode nobody's
+  anticipated yet, not just this specific one. Re-tested with a
+  deliberately different, never-before-seen exception type
+  (`KeyError`, not `AttributeError`) to confirm the catch-all generalizes
+  rather than just patching the one reported case — confirmed the cycle
+  survives and the traceback is still logged in full for debugging.
 
 ### Layer 2 — Stream Processing
 
@@ -352,6 +376,39 @@ shape is proven.
   current documentation, not run. Treat this as the one open item for this
   layer.
 
+**Code review findings (external review, all confirmed and fixed):**
+- **Critical: silver notebook would have failed on every single run.** The
+  original `02_silver_clean_dedup.py` called
+  `validate_silver_required_fields(bronze_df)` — validating the DataFrame
+  exactly as read from bronze Parquet — *before* the
+  `withColumn("observation_timestamp", ...)` conversion step. But
+  `SILVER_REQUIRED_FIELDS` includes `"observation_timestamp"`, which is a
+  silver-side column that doesn't exist anywhere in `BRONZE_SCHEMA` (bronze
+  only has the raw `dt` field). Since that column was therefore *always*
+  structurally absent at the point validation ran, `validate_silver_
+  required_fields()` raised `SchemaValidationError` on literally every
+  invocation — not a data-quality edge case affecting some rows, a
+  100%-of-the-time failure that would have permanently blocked every
+  silver write. Reproduced this exactly with a realistic bronze row (all
+  29 real `BRONZE_SCHEMA` fields, correctly missing `observation_timestamp`)
+  before fixing. **Fixed by reordering**: the `withColumn` conversion now
+  runs first, and validation runs against the converted DataFrame — not by
+  swapping `observation_timestamp` for `dt` in the required-fields list,
+  since `observation_timestamp` (not `dt`) is the actual dedup key and the
+  field downstream code depends on; validating the pre-conversion field
+  would have papered over the ordering bug without checking the thing that
+  actually matters. Re-verified with the same fake-DataFrame harness using
+  a post-conversion row — confirmed the gate now passes cleanly.
+- **Minor: redundant `.count()` calls.** Both `02_silver_clean_dedup.py`
+  (calling `good_rows.count()` twice in one print statement) and
+  `03_gold_aggregate_zorder.py` (re-counting `gold_rows` in the final exit
+  message, *after* the `OPTIMIZE` step had already run — triggering an
+  unnecessary full scan of a table that had just been Z-ordered) computed
+  the same count more than once. Neither was a correctness bug, just
+  wasted Spark scans. Both fixed by computing each count once into a named
+  variable (`good_count`, `gold_row_count`) and reusing it everywhere the
+  value was needed afterward.
+
 ### Layer 4 — Hot Path Serving
 
 **Cosmos DB partition key.** `city_id`. Query patterns are almost always
@@ -461,6 +518,13 @@ same pattern as the Spark-dependent layers above.
 
 ### Layer 5 — Cold Path Serving
 
+**Implementation status: implemented, design-verified, not deployed.**
+`cold_path/synapse_sql/create_external_tables_openrowset.sql` and
+`infra/bicep/synapse.bicep` are both real, not stubs — see implementation
+notes below for two genuine corrections made while building this layer,
+one of which would have caused real production instability if deployed as
+originally stubbed.
+
 **OPENROWSET vs PolyBase, serverless vs dedicated pools.**
 **OPENROWSET** (Synapse serverless SQL) was chosen: it's a pay-per-query model
 for ad hoc reads directly over files in a data lake, with no need to
@@ -473,6 +537,73 @@ traffic — none of which applies here. Dedicated pools also bill continuously
 per provisioned DWU whether or not they're being queried, which directly
 conflicts with the "moderate cost" goal for this project. This is a workload-
 fit decision, not a claim that dedicated pools are inferior in general.
+**This decision means no `Microsoft.Synapse/workspaces/sqlPools` resource
+exists anywhere in `synapse.bicep`** — the serverless SQL endpoint comes
+free with any Synapse workspace, so simply not provisioning a dedicated pool
+*is* the implementation of this decision, not an omission.
+
+**Implementation notes (real corrections made while building this layer):**
+- **`CREATE EXTERNAL TABLE` on a partitioned Delta folder is explicitly
+  unsupported and unsafe — this would have been a real bug if deployed.**
+  Per Microsoft's own docs: "external tables can't be created on a
+  partitioned folder... don't create external tables on partitioned Delta
+  Lake folders even if you see that they might work in some cases — using
+  unsupported features like this might cause issues or instability of the
+  serverless pool, and Azure support won't be able to resolve any issue if
+  it's using tables on partitioned folders." The supported alternative for
+  any partitioned Delta source is a **view** over `OPENROWSET`, not a table
+  — and for Delta specifically, the view doesn't even need manual
+  `FILEPATH()` partition-column extraction, since OPENROWSET reads Delta's
+  own partition metadata automatically and applies partition elimination
+  when the partition column appears in a query's `WHERE` clause. Checked
+  this against our actual notebooks before deciding what to do: **gold is
+  genuinely safe as a real `CREATE EXTERNAL TABLE`**, because
+  `03_gold_aggregate_zorder.py` writes it via `saveAsTable()` with no
+  `partitionBy` — gold has no Hive-style partition columns in its folder
+  structure (Z-ordering is a file-layout optimization via `OPTIMIZE`, a
+  completely different mechanism from Hive partitioning, easy to conflate
+  but not the same thing). Bronze and silver, by contrast, ARE partitioned
+  by `ingestion_date` (see `01_bronze_ingest.py` / `02_silver_clean_dedup.py`)
+  — if either is ever exposed through Synapse in the future, it must use
+  the view pattern, not the table pattern. A worked example of that view
+  pattern is included in the SQL file as a documented template, specifically
+  because the assignment's own prompt invites showing both are understood,
+  not just the one gold happens to need today.
+- **Entra-only authentication, not a SQL admin password.** Most generic
+  Synapse Bicep examples found online provision a `sqlAdministratorLogin` /
+  `sqlAdministratorLoginPassword` pair. Per Microsoft's docs, "Microsoft
+  Entra pass-through is the default behavior when you create a workspace,"
+  and managed identity is a supported authorization type for serverless SQL
+  pool storage access — `synapse.bicep` sets `azureADOnlyAuthentication: true`
+  instead, which fits the README's Layer 6 "managed identities everywhere"
+  decision far better than a standalone SQL credential would, and was a
+  deliberate choice not to copy the password-based pattern most examples
+  default to.
+- **Real cross-file dependency, not yet automatable.** The SQL file's
+  `CREATE EXTERNAL TABLE` column list was field-diffed against `GOLD_SCHEMA`
+  in `schema_definitions.py` and matches exactly (12/12 fields) — but unlike
+  the Python/PySpark schema cross-checks elsewhere in this repo, there's no
+  automated tooling that parses T-SQL DDL, so this match was verified once,
+  manually, and will silently drift if `GOLD_SCHEMA` changes without someone
+  remembering to update this file too. Flagged as a manual-sync point in
+  the SQL file's own comments rather than presented as a solved problem.
+- **`synapse.bicep` has a real, currently-unfilled dependency on
+  `storage.bicep`.** A Synapse workspace requires `defaultDataLakeStorage`
+  pointing at a real ADLS Gen2 filesystem at creation time — this isn't
+  optional. Since `storage.bicep` is still a stub (see implementation status
+  table), `synapse.bicep` takes the storage account's URL and filesystem
+  name as **parameters** rather than guessing at a hardcoded account name —
+  `main.bicep` is where these will actually get wired from `storage.bicep`'s
+  outputs once that module exists. This is the correct shape for the
+  dependency regardless of build order, not a workaround.
+- **Not yet execution-verified**: no Bicep CLI or Synapse workspace
+  available to actually run this SQL or deploy this template (same
+  constraint as Layer 4's Cosmos DB Bicep). Checked against current
+  Microsoft documentation examples and passed a basic brace/paren balance
+  check; the external-table-vs-view distinction above was the one finding
+  worth treating as load-bearing rather than cosmetic, since getting it
+  wrong wouldn't just be a syntax error — Microsoft's own docs describe it
+  as something that can destabilize the serverless pool itself.
 
 ### Layer 6 — Security and Observability
 

@@ -53,9 +53,35 @@ if bronze_count == 0:
 
 # COMMAND ----------
 
+from pyspark.sql.functions import from_unixtime, col, to_date
+
+# CRITICAL FIX (caught in code review): this conversion step must run
+# BEFORE validate_silver_required_fields(), not after. SILVER_REQUIRED_
+# FIELDS includes "observation_timestamp", which doesn't exist anywhere in
+# BRONZE_SCHEMA -- it's a SILVER-side column produced by converting
+# bronze's raw Unix `dt` into a proper timestamp. Validating bronze_df
+# directly (the original ordering) meant "observation_timestamp" was
+# ALWAYS structurally absent at validation time, so
+# validate_silver_required_fields() raised SchemaValidationError on every
+# single run with no exception -- a 100%-of-the-time failure, not a
+# data-quality edge case. Converting first means the column genuinely
+# exists by the time the gate checks it, and a row where `dt` was null/
+# unparseable now correctly shows up as a NULL observation_timestamp --
+# which the gate is designed to catch and quarantine, rather than crashing
+# the whole batch on a structural false alarm.
+converted = (
+    bronze_df
+    .withColumn("observation_timestamp", from_unixtime(col("dt")).cast("timestamp"))
+    .withColumn("ingestion_date", to_date(col("ingestion_date")))
+)
+
+# COMMAND ----------
+
 # --- schema validation gate (the actual enforcement point) ---
+# Runs against `converted`, not `bronze_df` -- see the fix note above for
+# why this ordering matters.
 try:
-    good_rows, bad_rows = validate_silver_required_fields(bronze_df)
+    good_rows, bad_rows = validate_silver_required_fields(converted)
 except SchemaValidationError as exc:
     # Structural failure -- bronze's actual columns no longer match what
     # SILVER_REQUIRED_FIELDS expects. This is a code/schema drift problem,
@@ -83,19 +109,6 @@ else:
 
 # COMMAND ----------
 
-from pyspark.sql.functions import from_unixtime, col, to_date
-
-# Convert bronze's raw Unix `dt` into observation_timestamp (TimestampType),
-# matching SILVER_SCHEMA. Falls back to poll_timestamp if dt is somehow
-# null but the row still passed the required-fields gate above (dt itself
-# isn't in SILVER_REQUIRED_FIELDS -- only the post-conversion
-# observation_timestamp matters downstream).
-cleaned = (
-    good_rows
-    .withColumn("observation_timestamp", from_unixtime(col("dt")).cast("timestamp"))
-    .withColumn("ingestion_date", to_date(col("ingestion_date")))
-)
-
 # Dedup on (city_id, observation_timestamp) -- if the same city polled twice
 # with the same observation timestamp (e.g. a retried Function execution
 # that both attempts ended up publishing), keep one. dropDuplicates keeps
@@ -103,11 +116,15 @@ cleaned = (
 # duplicate rows for the same (city, timestamp) should be identical in
 # practice -- they're re-publishes of the same OWM response, not
 # conflicting data that needs a tie-breaker rule.
-deduped = cleaned.dropDuplicates(["city_id", "observation_timestamp"])
+#
+# Operates on good_rows (post-validation), not the full converted set --
+# quarantined rows must never be deduped into the silver-bound output.
+deduped = good_rows.dropDuplicates(["city_id", "observation_timestamp"])
 
 deduped_count = deduped.count()
-print(f"{good_rows.count()} good rows -> {deduped_count} after dedup "
-      f"({good_rows.count() - deduped_count} duplicate(s) removed)")
+good_count = good_rows.count()
+print(f"{good_count} good rows -> {deduped_count} after dedup "
+      f"({good_count - deduped_count} duplicate(s) removed)")
 
 # COMMAND ----------
 

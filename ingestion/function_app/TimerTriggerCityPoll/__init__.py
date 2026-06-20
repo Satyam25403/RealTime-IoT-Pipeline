@@ -64,6 +64,29 @@ def main(mytimer: func.TimerRequest) -> None:
             logger.warning("city=%s failed this poll cycle: %s", city_id, exc)
             failed_cities.append(city_id)
             continue
+        except Exception as exc:
+            # Defense-in-depth, added after code review: the per-city
+            # isolation property this function exists to guarantee must
+            # hold even for failure modes we haven't specifically
+            # anticipated. CityFetchError alone only covers owm_client's
+            # own errors — it does NOT cover a bug or unexpected input
+            # shape inside enrich() (a real example was found and fixed:
+            # OWM returning an explicit "coord": null, not just omitting
+            # the key, raised an unguarded AttributeError that would have
+            # crashed this entire poll cycle, every city, not just one).
+            # Catching Exception broadly here is deliberate despite being
+            # generally bad practice — the alternative (one city's
+            # malformed response taking down all 12 cities' data for this
+            # cycle) is strictly worse, and the full traceback is still
+            # logged so the underlying bug remains visible and fixable.
+            logger.exception(
+                "city=%s failed this poll cycle with an UNEXPECTED error "
+                "(not a CityFetchError) — see traceback above; this "
+                "indicates a bug, not a normal API failure",
+                city_id,
+            )
+            failed_cities.append(city_id)
+            continue
 
     if not enriched_events:
         logger.error(
