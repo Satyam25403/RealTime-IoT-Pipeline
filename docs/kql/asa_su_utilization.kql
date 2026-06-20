@@ -1,10 +1,49 @@
-// PLANNED — Layer 6 observability (see README section 3, "Streaming Unit sizing").
-// Surfaces SU% utilization over time so SU count can be right-sized from
-// actual metrics rather than the a-priori guess documented in the README.
+// =============================================================================
+// Stream Analytics SU% utilization + backlog -- Layer 6 observability
+// (see README.md section 3, "Streaming Unit sizing" decision).
+// =============================================================================
+// Surfaces SU utilization so the 3-SU sizing documented in the README can
+// be validated or corrected against real metrics rather than left as an
+// a-priori guess once this job actually runs in Azure.
 //
-// TODO (against AzureMetrics for the Stream Analytics job):
+// CORRECTION from this file's original stub: the metric name guessed
+// originally was "SUUtilization." The real REST API metric name is
+// "ResourceUtilization" (confirmed against Microsoft's own
+// azure-streamanalytics-cicd autoscale tooling docs, which list
+// ResourceUtilization explicitly as a usable autoscale metric name) --
+// "SUUtilization" doesn't exist and a query using it would have returned
+// nothing, which could easily be misread as "0% utilization, all good"
+// rather than "wrong metric name, no data."
+//
+// SECOND CORRECTION: looking only at SU% in isolation is explicitly
+// against Microsoft's own guidance. Per their docs: "if SU% utilization is
+// high (above 80%), OR if input events get backlogged (even with a LOW
+// SU% utilization, since it doesn't show CPU usage), your workload likely
+// requires more compute." A query checking SU% alone could miss a real
+// bottleneck that only shows up as backlog -- so this file checks BOTH
+// ResourceUtilization and the separate BacklogedInputEvents metric, not
+// just the one originally planned.
+
+// --- Part 1: SU % utilization over time ---
+AzureMetrics
+| where ResourceProvider == "MICROSOFT.STREAMANALYTICS"
+| where MetricName == "ResourceUtilization"
+| summarize AvgUtilization = avg(Average), MaxUtilization = max(Maximum) by bin(TimeGenerated, 5m)
+| order by TimeGenerated desc
+
+// --- Part 2: backlogged input events (run separately, or union with Part 1
+// in a dashboard -- kept as two blocks here for readability, since they're
+// two different metrics with different units, not naturally one row each) ---
 // AzureMetrics
 // | where ResourceProvider == "MICROSOFT.STREAMANALYTICS"
-// | where MetricName == "SUUtilization"
-// | summarize AvgUtilization = avg(Average), MaxUtilization = max(Maximum) by bin(TimeGenerated, 5m)
-// | where AvgUtilization > 80   // alert threshold candidate
+// | where MetricName == "BacklogedInputEvents"
+// | summarize MaxBacklog = max(Maximum) by bin(TimeGenerated, 5m)
+// | where MaxBacklog > 0   // per Microsoft's docs, ANY nonzero value here means
+//                            // the job can't keep up -- this metric is meant to be
+//                            // read as "any backlog at all is worth investigating,"
+//                            // not "wait until it crosses some percentage threshold"
+//                            // the way SU% utilization is
+
+// --- alerting threshold, taken directly from Microsoft's documented
+// guidance (80%), not an arbitrary number picked for this project ---
+// | where AvgUtilization > 80

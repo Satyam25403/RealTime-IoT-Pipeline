@@ -37,12 +37,26 @@ ever touching the cloud. This is called out explicitly wherever it's relevant be
 | 2 — Stream Processing | **Implemented, mock-tested** | `stream_processing/asa_queries/` (real SAQL) + `local_emulation/windowing_logic.py` (6/6 unit tests passing). Spark wrapper design-verified, not yet run against a live emulator (no PySpark in build environment). |
 | 3 — Batch Transformation | **Implemented, mock-tested, code-reviewed** | `batch/databricks_notebooks/` (real PySpark/Delta) + `utils/schema_definitions.py`'s validation gate (3/3 unit tests passing) + ADF pipeline with verified parameter wiring. External code review caught a critical ordering bug in the silver notebook that would have failed every single run — fixed and re-verified. Not yet run on a real Spark session/cluster. |
 | 4 — Hot Path Serving | **Implemented, design-verified** | `infra/bicep/cosmosdb.bicep` (serverless + Synapse Link). Two real bugs caught and fixed in the upstream `.asaql` files (missing `id` field, missing `PartitionId` handling) plus a documentation correction (Power BI uses Synapse Link/DirectQuery, not Change Feed directly). No Bicep CLI available to validate syntax — checked against current docs only. |
-| 5 — Cold Path Serving | **Implemented, design-verified** | `cold_path/synapse_sql/` (real T-SQL, `CREATE EXTERNAL TABLE` for unpartitioned gold + a documented view-pattern template for any future partitioned source) + `infra/bicep/synapse.bicep` (Entra-only auth, no dedicated pool). Caught a real Microsoft-documented restriction (external tables on partitioned Delta folders can destabilize the serverless pool) before it became a bug. Not deployed — no Bicep CLI/Synapse workspace available. |
-| 6 — Security & Observability | Partially planned (KQL query stubs, IaC stubs) | |
+| 5 — Cold Path Serving | **Implemented, design-verified, code-reviewed** | `cold_path/synapse_sql/` (real T-SQL, `CREATE EXTERNAL TABLE` for unpartitioned gold + a documented view-pattern template for any future partitioned source) + `infra/bicep/synapse.bicep` (Entra-only auth, no dedicated pool). Caught a real Microsoft-documented restriction (external tables on partitioned Delta folders can destabilize the serverless pool) before it became a bug. External code review caught a real SQL execution-order bug (file format created after the table that references it) and flagged an unresolved Power BI-to-private-Synapse-endpoint connectivity gap — both fixed/documented. Not deployed — no Bicep CLI/Synapse workspace available. |
+| 6 — Security & Observability | **Implemented, design-verified** | `infra/bicep/identity.bicep` (UAMI), `keyvault.bicep` (RBAC, not access policies — matches the new 2026-02-01 default), `loganalytics.bicep` + `docs/kql/*.kql`. All three KQL queries had real corrections: wrong metric name, wrong table for error details, and a needlessly complex lag calculation — all three original versions would have returned misleadingly empty/blank results rather than obvious errors. Not deployed. |
 | Infra (Bicep) | Stubs only, not yet written | |
 
 This table is the single place to check what's real vs aspirational in this
 repo at any point — update it whenever a layer's status changes.
+
+**Frozen at this snapshot, June 2026.** Layers 1–6 went through four
+independent review rounds (implementation-time testing, two external
+bug-finding passes, and a live-execution confirmation pass) with
+convergent results: zero outstanding bugs across all six layers. The two
+honest open items are unchanged across every round — the Power BI →
+private Synapse endpoint connectivity gap (needs a VNet data gateway or
+on-premises data gateway, documented in `synapse.bicep` and
+`powerbi/README.md`) and the five stub Bicep files
+(`main.bicep`, `eventhub.bicep`, `function.bicep`, `storage.bicep`,
+`streamanalytics.bicep`). The five real Bicep modules
+(`identity`, `keyvault`, `loganalytics`, `cosmosdb`, `synapse`) expose
+outputs already shaped for `main.bicep` to consume, so writing the stubs
+later shouldn't require touching anything already implemented.
 
 ---
 
@@ -605,7 +619,57 @@ free with any Synapse workspace, so simply not provisioning a dedicated pool
   wrong wouldn't just be a syntax error — Microsoft's own docs describe it
   as something that can destabilize the serverless pool itself.
 
+**Code review findings (external review, both confirmed and addressed):**
+- **Real bug: the SQL file's own execution order contradicted its own
+  comment.** `create_external_tables_openrowset.sql`'s `CREATE EXTERNAL
+  TABLE gold_city_daily_stats` statement referenced `DeltaLakeFormat` in
+  its `FILE_FORMAT` clause, but the `CREATE EXTERNAL FILE FORMAT
+  DeltaLakeFormat` statement was physically placed *after* it in the file
+  — even though a comment directly above the file format block already
+  said it "must run BEFORE the CREATE EXTERNAL TABLE statement." Running
+  this file top-to-bottom as originally ordered would fail with "Cannot
+  find the object 'DeltaLakeFormat' because it does not exist or you do
+  not have permissions," since `CREATE EXTERNAL TABLE` resolves its
+  `FILE_FORMAT` reference at creation time. Confirmed by reading the literal
+  line order before fixing. Fixed by moving the file format block to
+  immediately after the external data source and before the table —
+  correct dependency order is now data source → file format → table, and
+  the code finally matches what the comment always claimed. Re-verified
+  the gold column list still matches `GOLD_SCHEMA` exactly (12/12) after
+  the restructure, since editing around a schema-sensitive block is exactly
+  the kind of change that could silently break a cross-file match.
+- **Real architectural gap: Power BI Service can't reach a
+  publicly-inaccessible Synapse endpoint, and nothing in this repo
+  addresses it.** `synapse.bicep` sets `publicNetworkAccess: 'Disabled'`,
+  which is the correct security posture per this project's Layer 6
+  decisions — but Power BI Service is cloud-hosted outside this project's
+  VNet, and disabling public access blocks the direct connection
+  `powerbi/README.md`'s "Historical trend report" artifact needs for
+  DirectQuery. This is a genuine, currently-unresolved gap, not something
+  solved elsewhere and under-documented. The two real bridging options are
+  a VNet data gateway (PaaS-managed, needs a Power-BI-delegated subnet and
+  the `Microsoft.PowerPlatform` resource provider registered) or a
+  traditional on-premises data gateway on a VM inside the VNet — neither is
+  provisioned anywhere in this repo yet. Flagged explicitly as an open item
+  in both `synapse.bicep`'s own comments and `powerbi/README.md`, rather
+  than left implicit, so it can't be mistaken for "already handled" by
+  someone reading either file in isolation. Worth noting this is
+  specifically a Synapse-side gap today: `cosmosdb.bicep` hasn't actually
+  set `publicNetworkAccess: 'Disabled'` yet (private endpoints for Cosmos
+  DB are a documented Layer 6 decision, not yet implemented in that file),
+  so the live alert dashboard artifact doesn't have this same problem
+  *yet* — but will, once that file catches up to the same posture.
+
 ### Layer 6 — Security and Observability
+
+**Implementation status: implemented, design-verified, not deployed.**
+`infra/bicep/identity.bicep`, `infra/bicep/keyvault.bicep`,
+`infra/bicep/loganalytics.bicep`, and all three files under `docs/kql/` are
+real, not stubs. This layer's KQL queries turned up the most consequential
+corrections of any layer so far — two of the three original query stubs
+would have run without error and returned misleadingly "clean" (empty or
+blank-field) results instead of obvious failures, which is a worse outcome
+than a syntax error. See implementation notes below.
 
 **User-assigned vs system-assigned managed identity.** **User-assigned**, for
 the Function and ADF. A system-assigned identity is deleted along with its
@@ -616,14 +680,95 @@ multiple resources, and its access stays stable across redeploys. (This isn't
 a universal rule: for a single, rarely-redeployed resource, system-assigned's
 simplicity is genuinely the better trade-off — it's chosen here specifically
 because this project redeploys Function/ADF resources repeatedly during
-development.)
+development.) `identity.bicep` provisions exactly one identity shared across
+every compute resource in this repo — a deliberate simplification for a
+single-project, single-environment-at-a-time deployment, not a claim that a
+larger system wouldn't reasonably want per-resource identities instead.
 
 **Observability.** Private endpoints on storage, Key Vault, and Cosmos DB.
-All diagnostic logs centralized in one Log Analytics workspace. Three KQL
-queries are included under `docs/kql/` for the three failure modes the
-assignment calls out: Event Hub consumer lag, Stream Analytics SU% exhaustion,
-and ADF pipeline failures — these are the actual alerting/debugging surface,
-not just a description of intent.
+All diagnostic logs centralized in one Log Analytics workspace
+(`loganalytics.bicep`). Three KQL queries are included under `docs/kql/` for
+the three failure modes the assignment calls out: Event Hub consumer lag,
+Stream Analytics SU% exhaustion, and ADF pipeline failures — these are the
+actual alerting/debugging surface, not just a description of intent.
+
+**Implementation notes (real corrections made while building this layer):**
+- **Key Vault uses RBAC, not access policies — and this is now the actual
+  default, not just the recommended option.** As of Key Vault API version
+  2026-02-01, Azure RBAC became the *default* access control model for
+  newly created vaults (previously it was opt-in). `keyvault.bicep` sets
+  `enableRbacAuthorization: true` explicitly anyway, rather than relying on
+  the default, so the decision stays visible in code even if a future API
+  version's default changes again. The identity gets `Key Vault Secrets
+  User` (role GUID `4633458b-17de-408a-b874-0445c86b69e6`, verified against
+  Microsoft's own role definitions before hardcoding it) — confirmed this
+  role's data actions are limited to `getSecret`/`readMetadata`, i.e.
+  genuinely read-only, matching `key_vault.py`'s only actual usage. The
+  secret name (`owm-api-key`) was cross-checked programmatically against
+  `shared/key_vault.py`'s `SECRET_NAME` constant — exact match confirmed,
+  not just eyeballed.
+- **Synapse workspace uses Entra-only auth, not a SQL admin password.**
+  Most generic Synapse Bicep examples found online provision a
+  `sqlAdministratorLogin`/`sqlAdministratorLoginPassword` pair.
+  `synapse.bicep` (Layer 5) sets `azureADOnlyAuthentication: true` instead,
+  since Microsoft Entra pass-through is documented as the default workspace
+  behavior and managed identity is a supported authorization type for
+  serverless SQL storage access — a better fit for this layer's "managed
+  identities everywhere" decision than copying the password-based pattern.
+- **Event Hub consumer lag query was needlessly complicated AND
+  incomplete in its original form.** The original stub planned a manual
+  self-join between "last checkpoint time" and "last enqueued time" to
+  compute lag. Unnecessary: Event Hub's own diagnostic logs already emit a
+  first-class `ConsumerLag` activity record — confirmed against a real
+  working example before rewriting. The corrected query is simpler AND
+  more correct than what was originally planned.
+- **Stream Analytics SU utilization query used a metric name that doesn't
+  exist.** The original stub queried `MetricName == "SUUtilization"`. The
+  real REST API metric name is `ResourceUtilization` (confirmed against
+  Microsoft's `azure-streamanalytics-cicd` autoscale tooling docs, which
+  list it explicitly). A query using the wrong name doesn't error — it
+  just returns zero rows, which is easy to misread as "0% utilization,
+  everything's fine" rather than "wrong metric name, no data at all." Also
+  corrected a second, independent gap: Microsoft's own guidance explicitly
+  warns against judging SU health from `ResourceUtilization` alone, since
+  it "doesn't show CPU usage" — a job can be backlogged with low SU%. The
+  rewritten query checks `BacklogedInputEvents` as a second, separate
+  signal, not just SU% in isolation, and uses the 80% alert threshold
+  Microsoft's own docs recommend rather than an arbitrary number.
+- **ADF pipeline failures query was querying a field that's documented to
+  always be empty — the most consequential of the three KQL corrections.**
+  The original stub read `ADFPipelineRun.Output.error` for failure detail.
+  Confirmed against a real, official Microsoft Q&A answer: `ADFPipelineRun`'s
+  `ErrorCode`/`ErrorMessage` columns are empty for failed pipelines by
+  design — a pipeline fails because one of its *activities* failed, and the
+  actual error detail lives on the separate `ADFActivityRun` table. The
+  original query would have run without error and returned rows with a
+  blank error message for every single failure — silently useless rather
+  than obviously broken, arguably the worst of the three failure modes
+  found in this layer since it would look like working tooling right up
+  until someone needed to actually debug a real failure. Rewritten as a
+  join between `ADFPipelineRun` (to find failed runs) and `ADFActivityRun`
+  (to get the actual error message and which of the three named activities
+  — `bronze_ingest`, `silver_clean_dedup`, `gold_aggregate_zorder` — failed),
+  with the activity name filter cross-checked programmatically against
+  `batch/adf_pipelines/pl_daily_batch_trigger.json`'s actual activity names.
+- **Shared theme across all three KQL corrections**: in every case, the
+  bug wouldn't have thrown an error — it would have returned an empty or
+  blank-field result that's easy to mistake for "everything's healthy."
+  This is worth calling out as a category of risk distinct from a syntax
+  error: a monitoring query that fails *silently* is arguably worse than
+  one that fails loudly, since it actively erodes trust in the dashboard
+  without ever triggering an investigation. All three are now documented
+  in their own files with the precondition (a diagnostic setting wiring
+  logs into this workspace) stated explicitly, specifically so a future
+  "why is this empty" investigation has somewhere to start.
+- **Not yet execution-verified**: no Bicep CLI, Azure subscription, or live
+  Log Analytics workspace available to actually run any of this (same
+  constraint noted for every other infra-touching layer). The KQL queries
+  were checked against real, working examples and official documentation
+  for table/column/metric names — not run against live data. Treat
+  deployment and live-data validation as the open item for this layer, same
+  pattern as Layers 4 and 5.
 
 ---
 

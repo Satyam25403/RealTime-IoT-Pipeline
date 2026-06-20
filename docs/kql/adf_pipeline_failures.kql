@@ -1,10 +1,71 @@
-// PLANNED — Layer 6 observability (see README section 3).
-// Surfaces failed ADF pipeline runs (the daily bronze->silver->gold trigger)
-// so failures are caught same-day rather than discovered when gold is stale.
+// =============================================================================
+// ADF pipeline failures -- Layer 6 observability (see README.md section 3).
+// =============================================================================
+// Surfaces failed runs of pl_daily_batch_trigger (the bronze -> silver ->
+// gold daily pipeline, see batch/adf_pipelines/pl_daily_batch_trigger.json)
+// WITH the actual error message, so failures are caught same-day rather
+// than discovered when gold turns out to be stale.
 //
-// TODO (against ADFPipelineRun table in Log Analytics):
-// ADFPipelineRun
-// | where PipelineName == "pl_daily_batch_trigger"
-// | where Status == "Failed"
-// | project TimeGenerated, RunId, Status, Parameters, ErrorMessage = tostring(Output.error)
-// | order by TimeGenerated desc
+// CRITICAL CORRECTION from this file's original stub: the original plan
+// queried ADFPipelineRun's Output.error field for error details. This
+// doesn't work -- confirmed against multiple real-world reports (including
+// an official Microsoft Q&A answer) that ADFPipelineRun's ErrorCode and
+// ErrorMessage columns are EMPTY for failed pipelines. A pipeline fails
+// because one of its ACTIVITIES failed, and the actual error detail lives
+// on ADFActivityRun, a separate table, keyed by RunId on the pipeline side
+// and PipelineRunId on the activity side. The original query would have
+// run without error and returned rows with a blank/null error message for
+// every failure -- a worse failure mode than an obvious syntax error,
+// since it looks like it's working.
+
+ADFPipelineRun
+| where PipelineName == "pl_daily_batch_trigger"
+| where Status == "Failed"
+| project
+    RunId,
+    PipelineTimeGenerated = TimeGenerated,
+    PipelineStart = Start,
+    PipelineEnd = End,
+    Parameters
+| join kind=inner (
+    ADFActivityRun
+    | where Status in ("Failed", "TimedOut")
+    | where ActivityName in ("bronze_ingest", "silver_clean_dedup", "gold_aggregate_zorder")
+        // these three names must match batch/adf_pipelines/pl_daily_batch_trigger.json's
+        // activity names exactly -- if that file's activities are ever renamed, this
+        // filter goes stale silently (returns zero rows, looks like "no failures"
+        // rather than "wrong activity names"), same risk class as the empty-result
+        // trap noted in eventhub_consumer_lag.kql
+    | project
+        PipelineRunId,
+        FailedActivityName = ActivityName,
+        ActivityStart = Start,
+        ActivityEnd = End,
+        ErrorMessage,
+        ErrorCode
+) on $left.RunId == $right.PipelineRunId
+| project
+    PipelineTimeGenerated,
+    RunId,
+    FailedActivityName,
+    ErrorCode,
+    ErrorMessage,
+    PipelineStart,
+    PipelineEnd,
+    Parameters
+| order by PipelineTimeGenerated desc
+
+// --- which of the three stages fails most often? worth knowing before
+// assuming failures are evenly distributed across bronze/silver/gold ---
+// ADFActivityRun
+// | where Status in ("Failed", "TimedOut")
+// | where ActivityName in ("bronze_ingest", "silver_clean_dedup", "gold_aggregate_zorder")
+// | summarize FailureCount = count() by ActivityName
+// | order by FailureCount desc
+
+// PRECONDITION, same as the other two KQL files in this folder: requires a
+// diagnostic setting on the ADF resource sending PipelineRuns AND
+// ActivityRuns categories to this Log Analytics workspace -- the ADF/Data
+// Factory Bicep module doesn't exist yet in this repo (still a stub), so
+// this setting isn't wired up anywhere yet. See loganalytics.bicep's
+// wiring template for the pattern that module should adopt once written.

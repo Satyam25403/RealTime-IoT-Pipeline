@@ -106,7 +106,7 @@ def publish(events: Iterable[dict]) -> int:
         raise PublishError(f"Failed to publish batch: {exc}") from exc
 
     logger.info("published %d event(s) across %d city/partition-key group(s)",
-                sent_count, len(events_by_city) if events else 0)
+                sent_count, len(events_by_city))
     return sent_count
 
 

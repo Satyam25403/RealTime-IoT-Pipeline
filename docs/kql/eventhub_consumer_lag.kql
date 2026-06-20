@@ -1,12 +1,60 @@
-// PLANNED — Layer 6 observability (see README section 3).
-// Diagnoses Event Hub consumer lag: difference between the last enqueued
-// sequence number per partition and the last sequence number checkpointed
-// by Stream Analytics. Persistent/growing lag = ASA falling behind ingestion.
+// =============================================================================
+// Event Hub consumer lag -- Layer 6 observability (see README.md section 3,
+// "Layer 6 — Security and Observability").
+// =============================================================================
+// Diagnoses whether Stream Analytics is keeping up with ingestion. A
+// persistent or growing lag means ASA is falling behind the Event Hub's
+// producers (the Layer 1 Function) -- the symptom you'd see is the
+// rolling-average and anomaly windows reflecting stale data, or the
+// AnomalyAlertsOutput Cosmos writes (see anomaly_detection.asaql) arriving
+// later than the window they describe.
 //
-// TODO (against the AzureDiagnostics / EventHubLogs table in Log Analytics):
-// AzureDiagnostics
-// | where ResourceProvider == "MICROSOFT.EVENTHUB"
-// | where OperationName == "PartitionCheckpointed" or OperationName == "PartitionEvents"
-// | summarize LastCheckpoint = max(TimeGenerated) by PartitionId = tostring(properties_s.PartitionId)
-// | join kind=inner ( ... last enqueued time per partition ... ) on PartitionId
-// | extend LagSeconds = datetime_diff('second', LastEnqueued, LastCheckpoint)
+// CORRECTION from this file's original stub: the original version of this
+// query planned to manually compute lag via a self-join between "last
+// checkpoint time" and "last enqueued time." That's unnecessary -- Event
+// Hub's own diagnostic logs already emit lag as a first-class metric via a
+// 'ConsumerLag' activity record. Found this in real Microsoft examples
+// before writing the join logic, which would have been a correct-but-
+// needlessly-complicated reimplementation of something Event Hub already
+// computes for you.
+//
+// PRECONDITION: requires a diagnostic setting on the Event Hub namespace
+// sending logs to this Log Analytics workspace (see loganalytics.bicep's
+// wiring template -- eventhub.bicep doesn't exist yet, so this setting
+// isn't actually deployed anywhere yet). Without it, this query runs
+// successfully and returns zero rows, which looks identical to "no lag"
+// in a dashboard -- worth remembering that a quiet result here could mean
+// either "healthy" or "not wired up," and checking AzureDiagnostics row
+// counts generally (not filtered to ConsumerLag) is the way to tell those
+// two cases apart if this ever looks suspiciously empty.
+
+AzureDiagnostics
+| where ResourceProvider == "MICROSOFT.EVENTHUB"
+| where ActivityName_s == "ConsumerLag"
+| project
+    TimeGenerated,
+    ConsumerGroup = ChildEntityName_s,
+    EventHubName = EntityName_s,
+    PartitionId = PartitionId_s,
+    LagCount = Count_d
+| where ConsumerGroup == "stream-analytics-local-emulation" or ConsumerGroup == "$Default"
+    // "stream-analytics-local-emulation" matches the consumer group name
+    // defined in tests/local_dev/config.json for the local emulator setup;
+    // the real ASA job's consumer group name in Azure should be added here
+    // too once streamanalytics.bicep actually creates one explicitly,
+    // rather than relying on $Default in production (a dedicated consumer
+    // group per consumer is the standard practice once there's more than
+    // one thing reading the same Event Hub).
+| order by TimeGenerated desc, PartitionId asc
+
+// --- alerting threshold candidate, for use in a scheduled query rule ---
+// (see loganalytics.bicep wiring notes for where an actual alert rule
+// resource would be defined, once eventhub.bicep exists to provide a
+// concrete scope to attach it to)
+//
+// | summarize MaxLag = max(LagCount) by EventHubName, PartitionId
+// | where MaxLag > 1000   // placeholder threshold -- no documented basis yet
+//                          // for what "too much lag" means at this project's
+//                          // actual throughput (a few KB/s); revisit once
+//                          // real metrics exist to calibrate against, rather
+//                          // than picking a round number now

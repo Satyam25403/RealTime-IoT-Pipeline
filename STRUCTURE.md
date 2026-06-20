@@ -8,19 +8,25 @@ realtime-iot-pipeline/
 │
 ├── infra/                             # Infrastructure as Code — governs WHAT gets deployed
 │   ├── bicep/
-│   │   ├── main.bicep                 # Orchestrates all modules, parameterized per environment
-│   │   ├── eventhub.bicep             # Namespace, hub, partitions, consumer groups
-│   │   ├── storage.bicep              # ADLS Gen2 account, bronze/silver/gold containers
-│   │   ├── keyvault.bicep             # Vault + access policies for the UAMI
-│   │   ├── function.bicep             # Function App, Consumption plan, app settings
-│   │   ├── streamanalytics.bicep      # ASA job shell (input/output bindings, SU count)
-│   │   ├── cosmosdb.bicep             # Serverless account, container, partition key
-│   │   ├── synapse.bicep              # Synapse workspace, serverless SQL pool (no dedicated pool)
-│   │   ├── loganalytics.bicep         # Workspace + diagnostic settings wiring
-│   │   └── identity.bicep             # User-assigned managed identity + role assignments
+│   │   ├── main.bicep                 # [STUB] Orchestrates all modules, parameterized per environment
+│   │   ├── eventhub.bicep             # [STUB] Namespace, hub, partitions, consumer groups
+│   │   ├── storage.bicep              # [STUB] ADLS Gen2 account, bronze/silver/gold containers
+│   │   ├── keyvault.bicep             # [IMPLEMENTED] Vault + RBAC role assignment for the UAMI --
+│   │   │                                # NOT access policies (this comment was stale; see README Layer 6,
+│   │   │                                # RBAC is now the actual API-version default as of 2026-02-01)
+│   │   ├── function.bicep             # [STUB] Function App, Consumption plan, app settings
+│   │   ├── streamanalytics.bicep      # [STUB] ASA job shell (input/output bindings, SU count)
+│   │   ├── cosmosdb.bicep             # [IMPLEMENTED] Serverless account, container, partition key,
+│   │   │                                # Synapse Link analytical storage
+│   │   ├── synapse.bicep              # [IMPLEMENTED] Synapse workspace, serverless SQL only,
+│   │   │                                # Entra-only auth (no dedicated pool, no SQL admin password)
+│   │   ├── loganalytics.bicep         # [IMPLEMENTED] Workspace + a documented diagnostic-settings
+│   │   │                                # wiring template for other modules to adopt once they exist
+│   │   └── identity.bicep             # [IMPLEMENTED] User-assigned managed identity, shared across
+│   │                                    # every compute resource in this repo
 │   ├── scripts/
-│   │   ├── deploy.sh                  # az deployment group create wrapper
-│   │   └── teardown.sh                # Safe resource group deletion
+│   │   ├── deploy.sh                  # [STUB] az deployment group create wrapper
+│   │   └── teardown.sh                # [STUB] Safe resource group deletion
 │   └── parameters/
 │       ├── dev.parameters.json
 │       └── prod.parameters.json
@@ -82,10 +88,12 @@ realtime-iot-pipeline/
 │   ├── openweathermap_api_reference.md # Full API docs: free endpoints used, params,
 │   │                                    # responses, errors, rate budget, vs One Call 4.0
 │   ├── decisions/ADR-*.md              # One-pager per "Think about" question, decision-log style
-│   └── kql/
-│       ├── eventhub_consumer_lag.kql
-│       ├── asa_su_utilization.kql
-│       └── adf_pipeline_failures.kql
+│   └── kql/                            # [IMPLEMENTED] all 3 had real corrections -- see README Layer 6
+│       ├── eventhub_consumer_lag.kql   # uses EH's own ConsumerLag activity, not a manual self-join
+│       ├── asa_su_utilization.kql      # ResourceUtilization (correct name) + BacklogedInputEvents,
+│       │                                # not the nonexistent "SUUtilization" + SU%-alone
+│       └── adf_pipeline_failures.kql   # joins ADFActivityRun for error detail -- ADFPipelineRun's
+│                                          # own error columns are documented to always be empty
 │
 ├── tests/
 │   └── local_dev/

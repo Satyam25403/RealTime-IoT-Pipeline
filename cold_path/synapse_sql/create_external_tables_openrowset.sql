@@ -63,6 +63,21 @@ IF NOT EXISTS (SELECT * FROM sys.external_data_sources WHERE name = 'AdlsLakehou
     );
 GO
 
+-- --- file format: MUST run before any CREATE EXTERNAL TABLE that
+-- references it. CORRECTED execution order (caught in code review): this
+-- block was originally placed AFTER the CREATE EXTERNAL TABLE statement
+-- below, even though this file's own comments already said it needed to
+-- run first -- the comment was right and the code contradicted it. Running
+-- the file top-to-bottom as originally ordered would fail with "Cannot
+-- find the object 'DeltaLakeFormat' because it does not exist or you do
+-- not have permissions," since CREATE EXTERNAL TABLE resolves its
+-- FILE_FORMAT reference at creation time, not lazily. Correct dependency
+-- order, now actually reflected in the code below: data source -> file
+-- format -> external table.
+IF NOT EXISTS (SELECT * FROM sys.external_file_formats WHERE name = 'DeltaLakeFormat')
+    CREATE EXTERNAL FILE FORMAT DeltaLakeFormat WITH (FORMAT_TYPE = DELTA);
+GO
+
 -- --- gold_city_daily_stats: CREATE EXTERNAL TABLE (see header — safe
 -- here because gold is unpartitioned) ---
 IF EXISTS (SELECT * FROM sys.external_tables WHERE name = 'gold_city_daily_stats')
@@ -100,16 +115,6 @@ WITH (
     DATA_SOURCE = AdlsLakehouseSource,
     FILE_FORMAT = DeltaLakeFormat
 );
-GO
-
--- File format must be created once before the table above can reference
--- it -- ordered last in this file for readability, but must run BEFORE
--- the CREATE EXTERNAL TABLE statement above in actual execution. (Synapse
--- SQL scripts in this repo are meant to be run top-to-bottom as one batch
--- via GO-separated statements; if splitting into separate deploy steps,
--- preserve this dependency order.)
-IF NOT EXISTS (SELECT * FROM sys.external_file_formats WHERE name = 'DeltaLakeFormat')
-    CREATE EXTERNAL FILE FORMAT DeltaLakeFormat WITH (FORMAT_TYPE = DELTA);
 GO
 
 -- =============================================================================

@@ -69,11 +69,31 @@ resource synapseWorkspace 'Microsoft.Synapse/workspaces@2021-06-01' = {
                                        // "private endpoints on storage" decision -- a workspace outside
                                        // a managed VNet can't use managed private endpoints to reach
                                        // storage privately
-    publicNetworkAccess: 'Disabled'   // see Layer 6 -- private endpoints, not public access, for every
+    publicNetworkAccess: 'Disabled' // see Layer 6 -- private endpoints, not public access, for every
                                        // resource in this project; this matches that posture for Synapse's
                                        // own workspace endpoint (not the same thing as storage access,
                                        // which is governed separately by the managed private endpoint
                                        // implied by managedVirtualNetwork above)
+    //
+    // UNADDRESSED GAP, flagged in code review: this setting blocks Power
+    // BI Service (cloud-hosted, outside this VNet) from reaching the
+    // serverless SQL endpoint directly -- which is exactly what
+    // powerbi/README.md's "Historical trend report" artifact (DirectQuery
+    // against this workspace, see cold_path/synapse_sql/) needs to do.
+    // Disabling public access is the right security posture, but it isn't
+    // a complete solution on its own -- something has to bridge Power BI
+    // Service to this private endpoint. The two real options:
+    //   1. A VNet data gateway (the modern, PaaS-managed option -- no VM
+    //      to run, but requires a subnet delegated to Power BI and the
+    //      Microsoft.PowerPlatform resource provider registered on this
+    //      subscription).
+    //   2. A traditional on-premises data gateway installed on a VM that
+    //      itself sits inside this VNet (or has network access to this
+    //      private endpoint), registered with the Power BI service.
+    // Neither is provisioned by this file or anywhere else in this repo
+    // yet -- this is a real, currently-open gap, not a solved problem
+    // referenced elsewhere. See powerbi/README.md for the same flag from
+    // the Power BI side of this dependency.
   }
   tags: {
     environment: environment
